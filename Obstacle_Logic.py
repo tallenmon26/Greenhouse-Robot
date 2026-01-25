@@ -1,105 +1,118 @@
 import cv2
 import depthai as dai
 import numpy as np
+import warnings
 import time
 
-# --- CONFIGURATION ---
-SAFE_DISTANCE_MM = 600  # 60cm
-ENABLE_SERIAL = False   # True only when connected to Robot (Windows = COMx)
+warnings.filterwarnings("ignore")
+
+SAFE_DISTANCE_MM = 600
+BLACK_THRESHOLD = 60
+ENABLE_SERIAL = False
 
 if ENABLE_SERIAL:
     import serial
-    try:
-        # Windows example: 'COM5' (check Device Manager > Ports)
-        ser = serial.Serial('COM5', 115200, timeout=0.1)
-    except Exception as e:
-        ser = None
-        print(f"WARNING: Could not connect to Serial Port! ({e})")
+    ser = serial.Serial("COM5", 115200, timeout=0.1)
 
-# --- PIPELINE SETUP (DepthAI v3 style) ---
+# Pipeline setup
 pipeline = dai.Pipeline()
 
-# v3 uses Camera node (MonoCamera is deprecated)
-# OAK-D Lite mono cameras are on CAM_B and CAM_C
-left_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-right_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+# Mono Cameras
+left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
 
+# RGB Camera 
+rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+
+# Stereo Depth
 stereo = pipeline.create(dai.node.StereoDepth)
-
-# Stereo settings (your intent preserved)
 stereo.setLeftRightCheck(True)
 stereo.setSubpixel(True)
-stereo.setExtendedDisparity(False)
 
-# Link cameras to stereo
-left_out = left_cam.requestFullResolutionOutput()
-right_out = right_cam.requestFullResolutionOutput()
-left_out.link(stereo.left)
-right_out.link(stereo.right)
+left.requestFullResolutionOutput().link(stereo.left)
+right.requestFullResolutionOutput().link(stereo.right)
 
-# Create a host output queue directly from the stereo output (v3)
-depth_queue = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
+# Outputs
+depth_q = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
+rgb_q = rgb_out.createOutputQueue(maxSize=4, blocking=False)
 
-print("Starting Obstacle Detection Logic (DepthAI v3)...")
-print("Press 'q' to quit.")
+print("Robot Vision Started — Press Q to quit")
 
+# Main loop
 with pipeline:
     pipeline.start()
 
     while pipeline.isRunning():
-        in_depth = depth_queue.tryGet()
-        if in_depth is None:
-            # No new frame yet
+        in_depth = depth_q.tryGet()
+        in_rgb = rgb_q.tryGet()
+
+        if in_depth is None or in_rgb is None:
             time.sleep(0.001)
             continue
 
-        frame = in_depth.getFrame()  # depth map (mm)
-
-        # --- CALCULATE DISTANCE ---
-        h, w = frame.shape
-        cy, cx = h // 2, w // 2
-
-        roi = frame[cy-5:cy+5, cx-5:cx+5]
+        # Depth processing
+        depth = in_depth.getFrame()
+        h, w = depth.shape
+        roi = depth[h//2-10:h//2+10, w//2-10:w//2+10]
         valid = roi[roi > 0]
+        distance = int(np.median(valid)) if valid.size else 9999
 
-        if valid.size > 0:
-            # Median is often more stable than mean for depth speckle/outliers
-            current_distance = int(np.median(valid))
-        else:
-            current_distance = 9999
+        depth_vis = cv2.normalize(depth, None, 0, 255,
+                                  cv2.NORM_MINMAX, cv2.CV_8UC1)
+        depth_vis = cv2.applyColorMap(
+            cv2.equalizeHist(depth_vis), cv2.COLORMAP_JET)
+        cv2.imshow("Depth", depth_vis)
 
-        # --- VISUALIZE ---
-        # Normalize for display (not for measurement)
-        disp = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8UC1)
-        disp = cv2.equalizeHist(disp)
-        disp = cv2.applyColorMap(disp, cv2.COLORMAP_JET)
+        # RGB LINE FOLLOWING
+        frame = in_rgb.getCvFrame()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, BLACK_THRESHOLD, 255,
+                                  cv2.THRESH_BINARY_INV)
 
-        # --- LOGIC & DECISION ---
-        if 0 < current_distance < SAFE_DISTANCE_MM:
-            status = "CRITICAL: OBSTACLE TOO CLOSE!"
+        contours, _ = cv2.findContours(thresh,
+                                       cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+
+        line_detected = False
+        error = 0
+        center_x = frame.shape[1] // 2
+
+        if contours:
+            c = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(c) > 500:
+                M = cv2.moments(c)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    error = cx - center_x
+                    line_detected = True
+                    cv2.drawContours(frame, [c], -1, (0,255,0), 2)
+                    cv2.line(frame, (center_x, 240),
+                             (cx, 240), (255,0,0), 2)
+
+        cv2.imshow("RGB Line Follow", frame)
+        cv2.imshow("Threshold", thresh)
+
+        # Make decision based on distance and line position
+        if 0 < distance < SAFE_DISTANCE_MM:
             command = "<STOP>"
-            color = (0, 0, 255)
-            print(f"COMMAND SENT >>> {command} (Dist: {current_distance}mm)")
-            if ENABLE_SERIAL and ser is not None:
-                ser.write(command.encode("ascii", errors="ignore"))
+        elif line_detected:
+            if error < -20:
+                command = "<TURN_L>"
+            elif error > 20:
+                command = "<TURN_R>"
+            else:
+                command = "<MOVE_FWD>"
         else:
-            status = "PATH CLEAR"
-            command = "<MOVE>"
-            color = (0, 255, 0)
+            command = "<SEARCH>"
 
-        cv2.putText(disp, f"Dist: {current_distance}mm", (30, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-        cv2.putText(disp, status, (30, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        cv2.rectangle(disp, (cx-10, cy-10), (cx+10, cy+10), (255, 255, 255), 2)
+        if ENABLE_SERIAL:
+            ser.write(command.encode())
 
-        cv2.imshow("Robot Vision Logic", disp)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if cv2.waitKey(1) == ord('q'):
             pipeline.stop()
             break
 
 cv2.destroyAllWindows()
-if ENABLE_SERIAL and 'ser' in globals() and ser is not None:
+if ENABLE_SERIAL:
     ser.close()
