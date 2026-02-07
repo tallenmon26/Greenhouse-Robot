@@ -23,12 +23,12 @@ right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
 
 # RGB Camera 
 rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+rgb_out = rgb_cam.requestOutput((416, 312), dai.ImgFrame.Type.BGR888p)
 
 # Stereo Depth
 stereo = pipeline.create(dai.node.StereoDepth)
 stereo.setLeftRightCheck(True)
-stereo.setSubpixel(True)
+stereo.setSubpixel(False)
 
 left.requestFullResolutionOutput().link(stereo.left)
 right.requestFullResolutionOutput().link(stereo.right)
@@ -91,7 +91,6 @@ with pipeline:
                              (cx, 240), (255,0,0), 2)
 
         cv2.imshow("RGB Line Follow", frame)
-        cv2.imshow("Threshold", thresh)
 
         # Make decision based on distance and line position
         if 0 < distance < SAFE_DISTANCE_MM:
