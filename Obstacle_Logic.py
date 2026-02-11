@@ -2,25 +2,30 @@ import cv2
 import depthai as dai
 import numpy as np
 import time
+import threading
+
+FPS_LIMIT = 30  # Cap FPS to reduce processing load
+frame_lock = threading.Lock()
+should_quit = False
 
 # --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 600
 BLACK_THRESHOLD = 60
 MIN_CONTOUR_AREA = 500
 
-# --- 1. OBSTACLE ZONE (Red Box - Look Ahead) ---
-OBST_ROI_X = 158
-OBST_ROI_Y = 100
-OBST_ROI_W = 100
-OBST_ROI_H = 80
+# --- 1. OBSTACLE ZONE (Red Box - Look Ahead/Forward) ---
+# Upper-middle area - catches obstacles in the forward direction
+OBST_ROI_X = 220  # Centered horizontally (for 640 width)
+OBST_ROI_Y = 60   # Upper area - forward line of sight at ~45°
+OBST_ROI_W = 200
+OBST_ROI_H = 140
 
-# --- 2. LINE ZONE (Yellow Box - Look Down) ---
-# OLD: Full width (0 to 416)
-# NEW: Narrower box in the center to ignore side noise
-LINE_ROI_W = 200        # Width of the box (smaller = ignores sides more)
-LINE_ROI_X = (416 - LINE_ROI_W) // 2  # Automatically center it
-LINE_ROI_Y = 220
-LINE_ROI_H = 80
+# --- 2. LINE ZONE (Yellow Box - Look Down at Ground) ---
+# Lower area - focuses on ground line directly below robot
+LINE_ROI_W = 200        
+LINE_ROI_X = (640 - LINE_ROI_W) // 2  # Centered (320)
+LINE_ROI_Y = 320        # Lower area - ground level
+LINE_ROI_H = 100
 
 # Pipeline setup
 pipeline = dai.Pipeline()
@@ -31,17 +36,17 @@ right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
 
 # RGB Camera
 rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgb_out = rgb_cam.requestOutput((416, 312), dai.ImgFrame.Type.BGR888p)
+rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
 
 # Stereo Depth
 stereo = pipeline.create(dai.node.StereoDepth)
 stereo.setLeftRightCheck(True)
 stereo.setSubpixel(False)
 
-left.requestFullResolutionOutput().link(stereo.left)
-right.requestFullResolutionOutput().link(stereo.right)
+left.requestOutput((640, 400)).link(stereo.left)
+right.requestOutput((640, 400)).link(stereo.right)
 
-# Outputs
+# Increase queue sizes to buffer frames
 depth_q = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
 rgb_q = rgb_out.createOutputQueue(maxSize=4, blocking=False)
 
@@ -50,14 +55,23 @@ print("Running... Press 'q' to quit.")
 # Main loop
 with pipeline:
     pipeline.start()
+    
+    last_frame_time = time.time()
+    frame_count = 0
 
-    while pipeline.isRunning():
+    while pipeline.isRunning() and not should_quit:
+        # FPS limiting - skip if we're going too fast
+        current_time = time.time()
+        if current_time - last_frame_time < (1.0 / FPS_LIMIT):
+            time.sleep(0.001)
+            continue
+        last_frame_time = current_time
+
         in_depth = depth_q.tryGet()
         in_rgb = rgb_q.tryGet()
 
         if in_depth is None or in_rgb is None:
-            time.sleep(0.001)
-            continue
+            continue  # Skip the sleep, just continue
 
         depth_frame = in_depth.getFrame()
         rgb_frame = in_rgb.getCvFrame()
@@ -140,7 +154,8 @@ with pipeline:
         cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
         cv2.imshow("Robot View", rgb_frame)
 
-        if cv2.waitKey(1) == ord('q'):
-            break
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            should_quit = True
 
 cv2.destroyAllWindows()
