@@ -143,38 +143,34 @@ with pipeline:
                     cv2.circle(rgb_frame, (cx_global, cy_global), 5, (0, 0, 255), -1)
 
         # --- 3. LOGIC ---
+        command_to_send = b"STOP\n" # Default to stopping safely
+
         if 0 < distance < SAFE_DISTANCE_MM:
             status = "STOP! OBSTACLE"
             color = (0, 0, 255)
-            print(f"CMD: <STOP> {distance}mm")
+            command_to_send = b"STOP\n"
             
-            # NEW: Send OBSTACLE command to ESP32
-            if esp32:
-                esp32.write(b"OBSTACLE\n") 
-                
         elif line_detected:
-            # Note: Threshold is smaller now because the box is smaller
             if error < -15:
                 status = "Turn LEFT"
                 color = (0, 255, 0)
+                command_to_send = b"LEFT\n"
             elif error > 15:
                 status = "Turn RIGHT"
                 color = (0, 255, 0)
+                command_to_send = b"RIGHT\n"
             else:
                 status = "FORWARD"
                 color = (0, 255, 0)
-                
-            # NEW: Send CLEAR command to ESP32 since there's no obstacle
-            if esp32:
-                esp32.write(b"CLEAR\n")
-                
+                command_to_send = b"FORWARD\n"
         else:
             status = "Searching..."
             color = (255, 100, 0)
-            
-            # NEW: Send CLEAR command here too
-            if esp32:
-                esp32.write(b"CLEAR\n")
+            command_to_send = b"STOP\n" # Stop moving if we lose the line completely
+
+        # Send the finalized command to the ESP32
+        if esp32:
+            esp32.write(command_to_send)
 
         cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
         cv2.imshow("Robot View", rgb_frame)
@@ -184,5 +180,9 @@ with pipeline:
             should_quit = True
 
 cv2.destroyAllWindows()
-if esp32 and esp32.is_open:
+if esp32:
+    print("\nShutting down... sending final STOP command to motors.")
+    esp32.write(b"STOP\n")
+    time.sleep(0.1) # Give the serial port a split second to flush the data
     esp32.close()
+    print("Motors stopped. Serial connection closed.")
