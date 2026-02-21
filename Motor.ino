@@ -1,49 +1,58 @@
-#include <Arduino.h>
+#include <SabertoothSimplified.h>
 
-// --- PINS ---
-// Adjust these if you used different pins
-const int LIFT_UP_PIN = D5;   // Connected to BTS7960 RPWM
-const int LIFT_DOWN_PIN = D6; // Connected to BTS7960 LPWM
+// Use Serial0 for the Nano ESP32 pins (TX1/D1)
+SabertoothSimplified ST(Serial0); 
 
-// --- SPEED SETTINGS ---
-// 0 = Stop, 255 = Full Speed
-const int LIFT_SPEED = 255; 
+// --- SAFETY & TUNING ---
+unsigned long lastCommandTime = 0;
+const unsigned long WATCHDOG_TIMEOUT = 500; // Stop if no command received for 500ms
+
+const int DRIVE_SPEED = 40; // Forward speed (0 to 127)
+const int TURN_SPEED = 30;  // Turning speed (0 to 127)
 
 void setup() {
-  // Configure pins as outputs
-  pinMode(LIFT_UP_PIN, OUTPUT);
-  pinMode(LIFT_DOWN_PIN, OUTPUT);
+  Serial0.begin(9600);   // Talk to Sabertooth
+  Serial.begin(115200);  // Talk to Raspberry Pi (Match Python baud rate!)
   
-  // Safety: Start with motor stopped
-  stopLift();
+  delay(2000); // Wait for Sabertooth to wake up
   
-  // Wait 2 seconds before starting so you can get ready
-  delay(2000);
+  // Start with a strict stop
+  ST.motor(1, 0);
+  ST.motor(2, 0);
 }
 
 void loop() {
-  // --- GO UP ---
-  // Ensure Down pin is 0 before writing Up pin to avoid shorting the bridge
-  analogWrite(LIFT_DOWN_PIN, 0); 
-  analogWrite(LIFT_UP_PIN, LIFT_SPEED); 
-  delay(5000); // Run for 5 seconds
-  
-  // --- STOP ---
-  stopLift();
-  delay(2000); // Wait 2 seconds
-  
-  // --- GO DOWN ---
-  analogWrite(LIFT_UP_PIN, 0); 
-  analogWrite(LIFT_DOWN_PIN, LIFT_SPEED);
-  delay(5000); // Run for 5 seconds
-  
-  // --- STOP ---
-  stopLift();
-  delay(2000); // Wait 2 seconds
-}
+  // 1. Check for incoming commands from the Pi
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    // We received a command, reset the safety timer!
+    lastCommandTime = millis(); 
 
-// Helper function to stop the motor safely
-void stopLift() {
-  analogWrite(LIFT_UP_PIN, 0);
-  analogWrite(LIFT_DOWN_PIN, 0);
+    // 2. Execute the movement
+    if (command == "FORWARD") {
+      ST.motor(1, DRIVE_SPEED);
+      ST.motor(2, DRIVE_SPEED);
+    } 
+    else if (command == "LEFT") {
+      ST.motor(1, -TURN_SPEED); // Reverse left motor
+      ST.motor(2, TURN_SPEED);  // Forward right motor
+    } 
+    else if (command == "RIGHT") {
+      ST.motor(1, TURN_SPEED);  // Forward left motor
+      ST.motor(2, -TURN_SPEED); // Reverse right motor
+    } 
+    else if (command == "STOP") {
+      ST.motor(1, 0);
+      ST.motor(2, 0);
+    }
+  }
+
+  // --- 3. THE WATCHDOG TIMER ---
+  // If 500ms pass without a word from the Pi, assume connection is lost and stop!
+  if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
+    ST.motor(1, 0);
+    ST.motor(2, 0);
+  }
 }
