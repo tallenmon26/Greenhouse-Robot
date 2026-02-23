@@ -2,8 +2,8 @@ import cv2
 import depthai as dai
 import numpy as np
 import time
-import threading
 import serial 
+import contextlib
 
 # --- Setup Serial Connection to ESP32 ---
 SERIAL_PORT = '/dev/ttyACM0' 
@@ -16,159 +16,174 @@ except serial.SerialException as e:
     esp32 = None
 
 FPS_LIMIT = 30  
-frame_lock = threading.Lock()
 should_quit = False
 
 # --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 600
 BLACK_THRESHOLD = 60
 MIN_CONTOUR_AREA = 500
+MISSING_LINE_THRESHOLD = 5 # How many frames of no line before we swap cameras
 
-# --- 1. OBSTACLE ZONE (Red Box) ---
-OBST_ROI_X = 220  
-OBST_ROI_Y = 60   
-OBST_ROI_W = 200
-OBST_ROI_H = 140
+OBST_ROI_X, OBST_ROI_Y, OBST_ROI_W, OBST_ROI_H = 220, 60, 200, 140
+LINE_ROI_W, LINE_ROI_H = 200, 100
+LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 320
 
-# --- 2. LINE ZONE (Yellow Box) ---
-LINE_ROI_W = 200        
-LINE_ROI_X = (640 - LINE_ROI_W) // 2  
-LINE_ROI_Y = 320        
-LINE_ROI_H = 100
+# --- MULTI-DEVICE INITIALIZATION (DepthAI v3) ---
+device_infos = dai.Device.getAllAvailableDevices()
+num_cams = len(device_infos)
+print(f"Found {num_cams} OAK-D camera(s) on the hub.")
 
-# Pipeline setup
-pipeline = dai.Pipeline()
+if num_cams == 0:
+    raise RuntimeError("No cameras detected! Check your hub power and USB connections.")
 
-left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
-rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+active_cam_idx = 1  
+missing_line_frames = 0
 
-stereo = pipeline.create(dai.node.StereoDepth)
-stereo.setLeftRightCheck(True)
-stereo.setSubpixel(False)
+# We use ExitStack to safely manage multiple USB devices at once
+with contextlib.ExitStack() as stack:
+    rgb_qs = []
+    depth_qs = []
 
-left.requestOutput((640, 400)).link(stereo.left)
-right.requestOutput((640, 400)).link(stereo.right)
+    # Boot up all connected cameras
+    for i, info in enumerate(device_infos):
+        # 1. Connect to the specific device
+        device = stack.enter_context(dai.Device(info))
+        
+        # 2. Create a pipeline uniquely bound to this device
+        pipeline = stack.enter_context(dai.Pipeline(device))
+        
+        # 3. Build Nodes (No XLinkOut needed in v3!)
+        left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+        right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+        rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+        
+        rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+        
+        stereo = pipeline.create(dai.node.StereoDepth)
+        stereo.setLeftRightCheck(True)
+        stereo.setSubpixel(False)
+        
+        left.requestOutput((640, 400)).link(stereo.left)
+        right.requestOutput((640, 400)).link(stereo.right)
+        
+        # --- THE FIX: Create the queues FIRST ---
+        # 4. Create device-scoped queues directly from the outputs
+        rgb_qs.append(rgb_out.createOutputQueue(maxSize=4, blocking=False))
+        depth_qs.append(stereo.depth.createOutputQueue(maxSize=4, blocking=False))
+        
+        # 5. NOW we can safely start the pipeline
+        pipeline.start()
+        # ----------------------------------------
+        
+        print(f"Started Camera {i}: {info.getDeviceId()}")
+        time.sleep(0.2) # Stagger opens slightly for USB stability
 
-depth_q = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
-rgb_q = rgb_out.createOutputQueue(maxSize=4, blocking=False)
-
-print("Running... Press 'q' to quit.")
-
-with pipeline:
-    pipeline.start()
-    
+    print("\nRunning... Press 'q' on the video window to quit.")
     last_frame_time = time.time()
 
-    while pipeline.isRunning() and not should_quit:
+    while not should_quit:
         current_time = time.time()
         if current_time - last_frame_time < (1.0 / FPS_LIMIT):
             time.sleep(0.001)
             continue
         last_frame_time = current_time
 
-        in_depth = depth_q.tryGet()
-        in_rgb = rgb_q.tryGet()
+        # Pull from ALL cameras to keep the USB queues from backing up
+        for i in range(num_cams):
+            in_depth = depth_qs[i].tryGet()
+            in_rgb = rgb_qs[i].tryGet()
 
-        if in_depth is None or in_rgb is None:
-            continue  
+            # Only process OpenCV math on the "active" camera
+            if i == active_cam_idx and in_depth is not None and in_rgb is not None:
+                depth_frame = in_depth.getFrame()
+                rgb_frame = in_rgb.getCvFrame()
+                
+                # --- OBSTACLE DETECTION ---
+                obst_roi = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H, OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
+                valid_depths = obst_roi[obst_roi > 0]
+                distance = int(np.percentile(valid_depths, 25)) if valid_depths.size else 9999
 
-        depth_frame = in_depth.getFrame()
-        rgb_frame = in_rgb.getCvFrame()
-        
-        # --- 1. OBSTACLE DETECTION (Optimized) ---
-        obst_roi = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H, 
-                               OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
-        valid_depths = obst_roi[obst_roi > 0]
-        
-        # NEW: Using 25th percentile for a safer, closer obstacle reading
-        distance = int(np.percentile(valid_depths, 25)) if valid_depths.size else 9999
+                color_status = (0, 0, 255) if (0 < distance < SAFE_DISTANCE_MM) else (0, 255, 0)
+                cv2.rectangle(rgb_frame, (OBST_ROI_X, OBST_ROI_Y), (OBST_ROI_X+OBST_ROI_W, OBST_ROI_Y+OBST_ROI_H), color_status, 2)
+                cv2.putText(rgb_frame, f"Dist: {distance}mm", (OBST_ROI_X, OBST_ROI_Y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_status, 2)
 
-        color_status = (0, 255, 0)
-        if 0 < distance < SAFE_DISTANCE_MM:
-            color_status = (0, 0, 255)
-        cv2.rectangle(rgb_frame, (OBST_ROI_X, OBST_ROI_Y), 
-                      (OBST_ROI_X+OBST_ROI_W, OBST_ROI_Y+OBST_ROI_H), color_status, 2)
-        cv2.putText(rgb_frame, f"Dist: {distance}mm", (OBST_ROI_X, OBST_ROI_Y-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_status, 2)
+                # --- LINE DETECTION ---
+                line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
+                _, thresh = cv2.threshold(line_roi_slice[:, :, 1], BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # --- 2. LINE DETECTION (Optimized) ---
-        line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, 
-                                   LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
-        
-        # NEW: Skip grayscale conversion, just slice the Green channel (index 1 of BGR)
-        green_channel = line_roi_slice[:, :, 1]
-        _, thresh = cv2.threshold(green_channel, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                line_detected = False
+                error = 0
+                box_center_x = LINE_ROI_W // 2 
 
-        line_detected = False
-        error = 0
-        box_center_x = LINE_ROI_W // 2 
+                cv2.rectangle(rgb_frame, (LINE_ROI_X, LINE_ROI_Y), (LINE_ROI_X+LINE_ROI_W, LINE_ROI_Y+LINE_ROI_H), (0, 255, 255), 2)
 
-        cv2.rectangle(rgb_frame, (LINE_ROI_X, LINE_ROI_Y), 
-                      (LINE_ROI_X+LINE_ROI_W, LINE_ROI_Y+LINE_ROI_H), (0, 255, 255), 2)
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(c) > MIN_CONTOUR_AREA:
+                        M = cv2.moments(c)
+                        if M["m00"] != 0:
+                            error = int(M["m10"] / M["m00"]) - box_center_x
+                            line_detected = True
+                            cv2.circle(rgb_frame, (int(M["m10"] / M["m00"]) + LINE_ROI_X, int(M["m01"] / M["m00"]) + LINE_ROI_Y), 5, (0, 0, 255), -1)
 
-        if contours:
-            c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > MIN_CONTOUR_AREA:
-                M = cv2.moments(c)
-                if M["m00"] != 0:
-                    cx_local = int(M["m10"] / M["m00"])
-                    cy_local = int(M["m01"] / M["m00"])
+                # --- SWAP LOGIC & MOTOR COMMANDS ---
+                command_to_send = b"STOP\n"
+                status = ""
+
+                if 0 < distance < SAFE_DISTANCE_MM:
+                    status = "STOP! OBSTACLE"
+                    command_to_send = b"STOP\n"
                     
-                    error = cx_local - box_center_x
-                    line_detected = True
+                elif line_detected:
+                    missing_line_frames = 0 # Reset counter because we see the line!
                     
-                    cx_global = cx_local + LINE_ROI_X
-                    cy_global = cy_local + LINE_ROI_Y
+                    if active_cam_idx == 1:
+                        # FRONT CAMERA LOGIC
+                        if error < -15: status, command_to_send = "Turn LEFT", b"LEFT\n"
+                        elif error > 15: status, command_to_send = "Turn RIGHT", b"RIGHT\n"
+                        else: status, command_to_send = "FORWARD", b"FORWARD\n"
+                    else:
+                        # REAR CAMERA LOGIC (Driving backward)
+                        if error < -15: status, command_to_send = "Reverse LEFT", b"RIGHT\n" 
+                        elif error > 15: status, command_to_send = "Reverse RIGHT", b"LEFT\n"
+                        else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
+                        
+                else:
+                    # WE LOST THE LINE!
+                    missing_line_frames += 1
+                    status = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
+                    command_to_send = b"STOP\n"
                     
-                    c_shifted = c + [LINE_ROI_X, LINE_ROI_Y]
-                    cv2.drawContours(rgb_frame, [c_shifted], -1, (0, 255, 0), 2)
-                    cv2.circle(rgb_frame, (cx_global, cy_global), 5, (0, 0, 255), -1)
+                    if missing_line_frames >= MISSING_LINE_THRESHOLD:
+                        if num_cams > 1:
+                            # TRIGGER THE CAMERA SWAP
+                            active_cam_idx = 1 if active_cam_idx == 0 else 0
+                            missing_line_frames = 0
+                            print(f"\n--- SWAPPING TO CAMERA {active_cam_idx} ---")
+                            # Give the serial a moment to breathe during the swap
+                            time.sleep(0.5) 
+                        else:
+                            # We only have 1 camera plugged in, so just stop safely.
+                            status = "END OF TAPE. STOPPED."
 
-        # --- 3. LOGIC ---
-        command_to_send = b"STOP\n"
+                if esp32:
+                    esp32.write(command_to_send)
 
-        if 0 < distance < SAFE_DISTANCE_MM:
-            status = "STOP! OBSTACLE"
-            color = (0, 0, 255)
-            command_to_send = b"STOP\n"
-            
-        elif line_detected:
-            if error < -15:
-                status = "Turn LEFT"
-                color = (0, 255, 0)
-                command_to_send = b"LEFT\n"
-            elif error > 15:
-                status = "Turn RIGHT"
-                color = (0, 255, 0)
-                command_to_send = b"RIGHT\n"
-            else:
-                status = "FORWARD"
-                color = (0, 255, 0)
-                command_to_send = b"FORWARD\n"
-        else:
-            status = "Searching..."
-            color = (255, 100, 0)
-            command_to_send = b"STOP\n"
-
-        if esp32:
-            esp32.write(command_to_send)
-
-        cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
-        cv2.imshow("Robot View", rgb_frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            should_quit = True
-
-cv2.destroyAllWindows()
+                # Draw which camera we are looking at on the screen
+                cam_label = "FRONT CAM" if active_cam_idx == 0 else "REAR CAM"
+                cv2.putText(rgb_frame, cam_label, (450, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+                cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
+                
+                cv2.imshow("Robot View", rgb_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    should_quit = True
 
 # --- SAFE SHUTDOWN ---
+cv2.destroyAllWindows()
 if esp32:
-    print("\nShutting down... sending final STOP command to motors.")
+    print("\nShutting down... sending final STOP command.")
     esp32.write(b"STOP\n")
     time.sleep(0.1) 
     esp32.close()
-    print("Motors stopped. Serial connection closed.")
+    print("Motors stopped.")
