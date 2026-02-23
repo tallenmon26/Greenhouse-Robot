@@ -25,8 +25,8 @@ MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 5 # How many frames of no line before we swap cameras
 
 OBST_ROI_X, OBST_ROI_Y, OBST_ROI_W, OBST_ROI_H = 220, 60, 200, 140
-LINE_ROI_W, LINE_ROI_H = 200, 100
-LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 320
+LINE_ROI_W, LINE_ROI_H = 200, 200
+LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
 # --- MULTI-DEVICE INITIALIZATION (DepthAI v3) ---
 device_infos = dai.Device.getAllAvailableDevices()
