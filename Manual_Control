@@ -1,0 +1,71 @@
+import serial
+import time
+import sys
+import tty
+import termios
+
+# --- Setup Serial Connection to Arduino Nano ESP32 ---
+SERIAL_PORT = '/dev/ttyACM0' 
+BAUD_RATE = 115200
+
+try:
+    esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+    time.sleep(2) # Give the ESP32 a moment to reset upon connection
+    print("Connected to ESP32!")
+except serial.SerialException as e:
+    print(f"Error: Could not connect to ESP32: {e}")
+    sys.exit(1)
+
+# Dictionary mapping keyboard keys to your specific ESP32 serial commands
+key_mapping = {
+    'w': b"FORWARD\n",
+    's': b"BACKWARD\n",
+    'a': b"LEFT\n",
+    'd': b"RIGHT\n",
+    ' ': b"STOP\n"  # Spacebar to hit the brakes
+}
+
+def get_key():
+    """Reads a single keypress from the Pi's terminal without waiting for the Enter key."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ch
+
+print("\n=== Manual Robot Control ===")
+print(" W = Forward  |  S = Backward")
+print(" A = Left     |  D = Right")
+print(" [Spacebar] = STOP")
+print(" Q = Quit Program")
+print("============================\n")
+
+try:
+    while True:
+        key = get_key().lower() # .lower() makes it work even if Caps Lock is on
+        
+        if key == 'q':
+            print("\nQuitting...")
+            esp32.write(b"STOP\n")
+            break
+            
+        if key in key_mapping:
+            command = key_mapping[key]
+            esp32.write(command)
+            
+            # Print the command to the terminal for visual feedback
+            command_name = command.decode().strip()
+            # The \r keeps the print statement neat while the terminal is in raw mode
+            print(f"Motor Command Sent: {command_name}          \r") 
+
+except KeyboardInterrupt:
+    # Catches Ctrl+C to ensure we don't leave the robot driving blindly
+    print("\nForce Quit detected.")
+finally:
+    # Failsafe shutdown
+    esp32.write(b"STOP\n")
+    esp32.close()
+    print("Serial connection closed. Motors stopped.")
