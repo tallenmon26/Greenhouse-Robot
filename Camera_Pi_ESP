@@ -22,7 +22,7 @@ should_quit = False
 SAFE_DISTANCE_MM = 600
 BLACK_THRESHOLD = 60
 MIN_CONTOUR_AREA = 500
-MISSING_LINE_THRESHOLD = 5 # How many frames of no line before we swap cameras
+MISSING_LINE_THRESHOLD = 15 # How many frames of no line before we swap cameras
 
 OBST_ROI_X, OBST_ROI_Y, OBST_ROI_W, OBST_ROI_H = 220, 60, 200, 140
 LINE_ROI_W, LINE_ROI_H = 200, 200
@@ -109,7 +109,16 @@ with contextlib.ExitStack() as stack:
 
                 # --- LINE DETECTION ---
                 line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
-                _, thresh = cv2.threshold(line_roi_slice[:, :, 1], BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+                
+                # 1. Convert to grayscale for much better black/white contrast
+                gray_roi = cv2.cvtColor(line_roi_slice, cv2.COLOR_BGR2GRAY)
+                
+                # 2. Apply threshold (You may need to tweak BLACK_THRESHOLD up to ~80-100)
+                _, thresh = cv2.threshold(gray_roi, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+                
+                # 3. DEBUG WINDOW: This is crucial for tuning your BLACK_THRESHOLD!
+                cv2.imshow("Tape Mask Debug", thresh) 
+
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 line_detected = False
