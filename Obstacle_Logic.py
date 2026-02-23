@@ -2,160 +2,165 @@ import cv2
 import depthai as dai
 import numpy as np
 import time
-import threading
+import serial 
+import contextlib
+import signal
+import sys
 
-FPS_LIMIT = 30  # Cap FPS to reduce processing load
-frame_lock = threading.Lock()
+# --- Setup Serial Connection to ESP32 ---
+SERIAL_PORT = '/dev/ttyACM0' 
+BAUD_RATE = 115200
+try:
+    esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+    time.sleep(2) 
+except serial.SerialException as e:
+    print(f"Warning: Could not connect to ESP32: {e}")
+    esp32 = None
+
+FPS_LIMIT = 30  
 should_quit = False
+
+# --- Graceful shutdown on Ctrl+C ---
+def handle_sigint(sig, frame):
+    global should_quit
+    print("\nCtrl+C detected — stopping...")
+    should_quit = True
+
+signal.signal(signal.SIGINT, handle_sigint)
 
 # --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 600
 BLACK_THRESHOLD = 60
 MIN_CONTOUR_AREA = 500
+MISSING_LINE_THRESHOLD = 5
 
-# --- 1. OBSTACLE ZONE (Red Box - Look Ahead/Forward) ---
-# Upper-middle area - catches obstacles in the forward direction
-OBST_ROI_X = 220  # Centered horizontally (for 640 width)
-OBST_ROI_Y = 60   # Upper area - forward line of sight at ~45°
-OBST_ROI_W = 200
-OBST_ROI_H = 140
+OBST_ROI_X, OBST_ROI_Y, OBST_ROI_W, OBST_ROI_H = 220, 60, 200, 140
+LINE_ROI_W, LINE_ROI_H = 200, 200
+LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
-# --- 2. LINE ZONE (Yellow Box - Look Down at Ground) ---
-# Lower area - focuses on ground line directly below robot
-LINE_ROI_W = 200        
-LINE_ROI_X = (640 - LINE_ROI_W) // 2  # Centered (320)
-LINE_ROI_Y = 320        # Lower area - ground level
-LINE_ROI_H = 100
+# --- MULTI-DEVICE INITIALIZATION (DepthAI v3) ---
+device_infos = dai.Device.getAllAvailableDevices()
+num_cams = len(device_infos)
+print(f"Found {num_cams} OAK-D camera(s) on the hub.")
 
-# Pipeline setup
-pipeline = dai.Pipeline()
+if num_cams == 0:
+    raise RuntimeError("No cameras detected! Check your hub power and USB connections.")
 
-# Mono Cameras
-left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+active_cam_idx = 1  
+missing_line_frames = 0
 
-# RGB Camera
-rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+with contextlib.ExitStack() as stack:
+    rgb_qs = []
+    depth_qs = []
 
-# Stereo Depth
-stereo = pipeline.create(dai.node.StereoDepth)
-stereo.setLeftRightCheck(True)
-stereo.setSubpixel(False)
+    for i, info in enumerate(device_infos):
+        device = stack.enter_context(dai.Device(info))
+        pipeline = stack.enter_context(dai.Pipeline(device))
+        
+        left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+        right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+        rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+        
+        rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+        
+        stereo = pipeline.create(dai.node.StereoDepth)
+        stereo.setLeftRightCheck(True)
+        stereo.setSubpixel(False)
+        
+        left.requestOutput((640, 400)).link(stereo.left)
+        right.requestOutput((640, 400)).link(stereo.right)
+        
+        rgb_qs.append(rgb_out.createOutputQueue(maxSize=4, blocking=False))
+        depth_qs.append(stereo.depth.createOutputQueue(maxSize=4, blocking=False))
+        
+        pipeline.start()
+        print(f"Started Camera {i}: {info.getDeviceId()}")
+        time.sleep(0.2)
 
-left.requestOutput((640, 400)).link(stereo.left)
-right.requestOutput((640, 400)).link(stereo.right)
-
-# Increase queue sizes to buffer frames
-depth_q = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
-rgb_q = rgb_out.createOutputQueue(maxSize=4, blocking=False)
-
-print("Running... Press 'q' to quit.")
-
-# Main loop
-with pipeline:
-    pipeline.start()
-    
+    print("\nRunning headless. Press Ctrl+C to stop.")
     last_frame_time = time.time()
-    frame_count = 0
 
-    while pipeline.isRunning() and not should_quit:
-        # FPS limiting - skip if we're going too fast
+    while not should_quit:
         current_time = time.time()
         if current_time - last_frame_time < (1.0 / FPS_LIMIT):
             time.sleep(0.001)
             continue
         last_frame_time = current_time
 
-        in_depth = depth_q.tryGet()
-        in_rgb = rgb_q.tryGet()
+        for i in range(num_cams):
+            in_depth = depth_qs[i].tryGet()
+            in_rgb = rgb_qs[i].tryGet()
 
-        if in_depth is None or in_rgb is None:
-            continue  # Skip the sleep, just continue
+            if i == active_cam_idx and in_depth is not None and in_rgb is not None:
+                depth_frame = in_depth.getFrame()
+                rgb_frame = in_rgb.getCvFrame()
+                
+                # --- OBSTACLE DETECTION ---
+                obst_roi = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H, OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
+                valid_depths = obst_roi[obst_roi > 0]
+                distance = int(np.percentile(valid_depths, 25)) if valid_depths.size else 9999
 
-        depth_frame = in_depth.getFrame()
-        rgb_frame = in_rgb.getCvFrame()
-        
-        # --- 1. OBSTACLE DETECTION (Red Box) ---
-        obst_roi = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H, 
-                               OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
-        valid_depths = obst_roi[obst_roi > 0]
-        distance = int(np.median(valid_depths)) if valid_depths.size else 9999
+                # --- LINE DETECTION ---
+                line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
+                _, thresh = cv2.threshold(line_roi_slice[:, :, 1], BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Draw Obstacle Box
-        color_status = (0, 255, 0)
-        if 0 < distance < SAFE_DISTANCE_MM:
-            color_status = (0, 0, 255)
-        cv2.rectangle(rgb_frame, (OBST_ROI_X, OBST_ROI_Y), 
-                      (OBST_ROI_X+OBST_ROI_W, OBST_ROI_Y+OBST_ROI_H), color_status, 2)
-        cv2.putText(rgb_frame, f"Dist: {distance}mm", (OBST_ROI_X, OBST_ROI_Y-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_status, 2)
+                line_detected = False
+                error = 0
+                box_center_x = LINE_ROI_W // 2
 
-        # --- 2. LINE DETECTION (Yellow Box) ---
-        # Crop to the NEW narrower ROI
-        line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, 
-                                   LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
-        
-        gray_roi = cv2.cvtColor(line_roi_slice, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray_roi, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(c) > MIN_CONTOUR_AREA:
+                        M = cv2.moments(c)
+                        if M["m00"] != 0:
+                            error = int(M["m10"] / M["m00"]) - box_center_x
+                            line_detected = True
 
-        line_detected = False
-        error = 0
-        
-        # Center of the SEARCH BOX, not the whole screen
-        box_center_x = LINE_ROI_W // 2 
+                # --- SWAP LOGIC & MOTOR COMMANDS ---
+                command_to_send = b"STOP\n"
+                status = ""
 
-        # Draw the Yellow Search Box
-        cv2.rectangle(rgb_frame, (LINE_ROI_X, LINE_ROI_Y), 
-                      (LINE_ROI_X+LINE_ROI_W, LINE_ROI_Y+LINE_ROI_H), (0, 255, 255), 2)
-
-        if contours:
-            c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > MIN_CONTOUR_AREA:
-                M = cv2.moments(c)
-                if M["m00"] != 0:
-                    cx_local = int(M["m10"] / M["m00"])
-                    cy_local = int(M["m01"] / M["m00"])
+                if 0 < distance < SAFE_DISTANCE_MM:
+                    status = "STOP! OBSTACLE"
+                    command_to_send = b"STOP\n"
                     
-                    # Error is relative to the center of the yellow box
-                    error = cx_local - box_center_x
-                    line_detected = True
+                elif line_detected:
+                    missing_line_frames = 0
                     
-                    # Convert local box coordinates to global screen coordinates for drawing
-                    cx_global = cx_local + LINE_ROI_X
-                    cy_global = cy_local + LINE_ROI_Y
+                    if active_cam_idx == 1:
+                        if error < -15: status, command_to_send = "Turn LEFT", b"LEFT\n"
+                        elif error > 15: status, command_to_send = "Turn RIGHT", b"RIGHT\n"
+                        else: status, command_to_send = "FORWARD", b"FORWARD\n"
+                    else:
+                        if error < -15: status, command_to_send = "Reverse LEFT", b"RIGHT\n" 
+                        elif error > 15: status, command_to_send = "Reverse RIGHT", b"LEFT\n"
+                        else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
+                        
+                else:
+                    missing_line_frames += 1
+                    status = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
+                    command_to_send = b"STOP\n"
                     
-                    # Draw Line
-                    c_shifted = c + [LINE_ROI_X, LINE_ROI_Y]
-                    cv2.drawContours(rgb_frame, [c_shifted], -1, (0, 255, 0), 2)
-                    cv2.circle(rgb_frame, (cx_global, cy_global), 5, (0, 0, 255), -1)
+                    if missing_line_frames >= MISSING_LINE_THRESHOLD:
+                        if num_cams > 1:
+                            active_cam_idx = 1 if active_cam_idx == 0 else 0
+                            missing_line_frames = 0
+                            print(f"\n--- SWAPPING TO CAMERA {active_cam_idx} ---")
+                            time.sleep(0.5) 
+                        else:
+                            status = "END OF TAPE. STOPPED."
 
-        # --- 3. LOGIC ---
-        if 0 < distance < SAFE_DISTANCE_MM:
-            status = "STOP! OBSTACLE"
-            color = (0, 0, 255)
-            print(f"CMD: <STOP> {distance}mm")
-        elif line_detected:
-            # Note: Threshold is smaller now because the box is smaller
-            if error < -15:
-                status = "Turn LEFT"
-                color = (0, 255, 0)
-            elif error > 15:
-                status = "Turn RIGHT"
-                color = (0, 255, 0)
-            else:
-                status = "FORWARD"
-                color = (0, 255, 0)
-        else:
-            status = "Searching..."
-            color = (255, 100, 0)
+                if esp32:
+                    esp32.write(command_to_send)
 
-        cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
-        cv2.imshow("Robot View", rgb_frame)
+                cam_label = "FRONT CAM" if active_cam_idx == 0 else "REAR CAM"
+                print(f"\r[{cam_label}] {status:<30} | Dist: {distance}mm | Error: {error:+d}   ", end="", flush=True)
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            should_quit = True
-
-cv2.destroyAllWindows()
+# --- SAFE SHUTDOWN ---
+if esp32:
+    print("\nShutting down... sending final STOP command.")
+    esp32.write(b"STOP\n")
+    time.sleep(0.1) 
+    esp32.close()
+    print("Motors stopped.")
