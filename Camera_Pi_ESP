@@ -135,6 +135,10 @@ with contextlib.ExitStack() as stack:
                 command_to_send = b"STOP\n"
                 status = ""
 
+                # Explicitly mapping the USB indexes to your physical cameras
+                FRONT_CAM_INDEX = 1
+                REAR_CAM_INDEX = 0
+
                 if 0 < distance < SAFE_DISTANCE_MM:
                     status = "STOP! OBSTACLE"
                     command_to_send = b"STOP\n"
@@ -142,13 +146,14 @@ with contextlib.ExitStack() as stack:
                 elif line_detected:
                     missing_line_frames = 0 # Reset counter because we see the line!
                     
-                    if active_cam_idx == 0:
-                        # FRONT CAMERA LOGIC
+                    if active_cam_idx == FRONT_CAM_INDEX:
+                        # --- FRONT CAMERA LOGIC (Index 1) ---
                         if error < -15: status, command_to_send = "Turn LEFT", b"LEFT\n"
                         elif error > 15: status, command_to_send = "Turn RIGHT", b"RIGHT\n"
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
-                    else:
-                        # REAR CAMERA LOGIC (Driving backward)
+                    elif active_cam_idx == REAR_CAM_INDEX:
+                        # --- REAR CAMERA LOGIC (Index 0) ---
+                        # Restored your correct inverted commands for the motor driver!
                         if error < -15: status, command_to_send = "Reverse LEFT", b"LEFT\n" 
                         elif error > 15: status, command_to_send = "Reverse RIGHT", b"RIGHT\n"
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
@@ -162,20 +167,18 @@ with contextlib.ExitStack() as stack:
                     if missing_line_frames >= MISSING_LINE_THRESHOLD:
                         if num_cams > 1:
                             # TRIGGER THE CAMERA SWAP
-                            active_cam_idx = 1 if active_cam_idx == 0 else 0
+                            active_cam_idx = REAR_CAM_INDEX if active_cam_idx == FRONT_CAM_INDEX else FRONT_CAM_INDEX
                             missing_line_frames = 0
                             print(f"\n--- SWAPPING TO CAMERA {active_cam_idx} ---")
-                            # Give the serial a moment to breathe during the swap
                             time.sleep(0.5) 
                         else:
-                            # We only have 1 camera plugged in, so just stop safely.
                             status = "END OF TAPE. STOPPED."
 
                 if esp32:
                     esp32.write(command_to_send)
 
                 # Draw which camera we are looking at on the screen
-                cam_label = "FRONT CAM" if active_cam_idx == 0 else "REAR CAM"
+                cam_label = "FRONT CAM" if active_cam_idx == FRONT_CAM_INDEX else "REAR CAM"
                 cv2.putText(rgb_frame, cam_label, (450, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
                 cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
                 
