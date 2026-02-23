@@ -19,8 +19,8 @@ FPS_LIMIT = 30
 should_quit = False
 
 # --- TUNING PARAMETERS ---
-SAFE_DISTANCE_MM = 900
-BLACK_THRESHOLD = 80
+SAFE_DISTANCE_MM = 300
+BLACK_THRESHOLD = 60
 MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 15 # How many frames of no line before we swap cameras
 
