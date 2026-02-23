@@ -20,7 +20,7 @@ should_quit = False
 
 # --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 600
-BLACK_THRESHOLD = 60
+BLACK_THRESHOLD = 90
 MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 15 # How many frames of no line before we swap cameras
 
@@ -109,15 +109,10 @@ with contextlib.ExitStack() as stack:
 
                 # --- LINE DETECTION ---
                 line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
+                _, thresh = cv2.threshold(line_roi_slice[:, :, 1], BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
                 
-                # 1. Convert to grayscale for much better black/white contrast
-                gray_roi = cv2.cvtColor(line_roi_slice, cv2.COLOR_BGR2GRAY)
-                
-                # 2. Apply threshold (You may need to tweak BLACK_THRESHOLD up to ~80-100)
-                _, thresh = cv2.threshold(gray_roi, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
-                
-                # 3. DEBUG WINDOW: This is crucial for tuning your BLACK_THRESHOLD!
-                cv2.imshow("Tape Mask Debug", thresh) 
+                # SHOW THE MATH: This creates a second, black-and-white window.
+                cv2.imshow("Binary Mask (What OpenCV Sees)", thresh)
 
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -147,15 +142,15 @@ with contextlib.ExitStack() as stack:
                 elif line_detected:
                     missing_line_frames = 0 # Reset counter because we see the line!
                     
-                    if active_cam_idx == 1:
+                    if active_cam_idx == 0:
                         # FRONT CAMERA LOGIC
                         if error < -15: status, command_to_send = "Turn LEFT", b"LEFT\n"
                         elif error > 15: status, command_to_send = "Turn RIGHT", b"RIGHT\n"
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
                     else:
                         # REAR CAMERA LOGIC (Driving backward)
-                        if error < -15: status, command_to_send = "Reverse LEFT", b"RIGHT\n" 
-                        elif error > 15: status, command_to_send = "Reverse RIGHT", b"LEFT\n"
+                        if error < -15: status, command_to_send = "Reverse LEFT", b"LEFT\n" 
+                        elif error > 15: status, command_to_send = "Reverse RIGHT", b"RIGHT\n"
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
                         
                 else:
