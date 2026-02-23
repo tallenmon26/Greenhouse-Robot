@@ -30,7 +30,7 @@ signal.signal(signal.SIGINT, handle_sigint)
 
 # --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 600
-BLACK_THRESHOLD = 60
+BLACK_THRESHOLD = 90
 MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 5
 
@@ -164,3 +164,4 @@ if esp32:
     time.sleep(0.1) 
     esp32.close()
     print("Motors stopped.")
+
