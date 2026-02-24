@@ -29,28 +29,27 @@ void loop() {
     
     // We received a command, reset the safety timer!
     lastCommandTime = millis(); 
-
-    // 2. Execute the movement
+    
     if (command == "FORWARD") {
       ST.motor(1, DRIVE_SPEED);
       ST.motor(2, DRIVE_SPEED);
     } 
     else if (command == "LEFT") {
-      ST.motor(1, -TURN_SPEED); // Reverse left motor
-      ST.motor(2, TURN_SPEED);  // Forward right motor
+      ST.motor(1, -TURN_SPEED); 
+      ST.motor(2, TURN_SPEED); 
     } 
     else if (command == "RIGHT") {
-      ST.motor(1, TURN_SPEED);  // Forward left motor
-      ST.motor(2, -TURN_SPEED); // Reverse right motor
+      ST.motor(1, TURN_SPEED);  
+      ST.motor(2, -TURN_SPEED);
     } 
     else if (command == "STOP") {
       ST.motor(1, 0);
       ST.motor(2, 0);
     }
-  }
+  }  
 
   // --- 3. THE WATCHDOG TIMER ---
-  // If 500ms pass without a word from the Pi, assume connection is lost and stop!
+  // If 500ms pass wit  hout a word from the Pi, assume connection is lost and stop!
   if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
     ST.motor(1, 0);
     ST.motor(2, 0);
