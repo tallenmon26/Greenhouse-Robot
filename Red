@@ -161,20 +161,16 @@ with contextlib.ExitStack() as stack:
                     command_to_send = b"STOP\n"
                     
                 elif line_detected:
-                    missing_line_frames = 0 # Reset counter because we see the line!
-                    
+                    missing_line_frames = 0 
                     if active_cam_idx == FRONT_CAM_INDEX:
-                        # --- FRONT CAMERA LOGIC (Index 1) ---
                         if error < -15: status, command_to_send = "Turn LEFT", b"LEFT\n"
                         elif error > 15: status, command_to_send = "Turn RIGHT", b"RIGHT\n"
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
                     elif active_cam_idx == REAR_CAM_INDEX:
-                        # --- REAR CAMERA LOGIC (Index 0) ---
-                        # Restored your correct inverted commands for the motor driver!
                         if error < -15: status, command_to_send = "Reverse LEFT", b"LEFT\n" 
                         elif error > 15: status, command_to_send = "Reverse RIGHT", b"RIGHT\n"
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
-                        
+
                 else:
                     # WE LOST THE LINE!
                     missing_line_frames += 1
