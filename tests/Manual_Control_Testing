@@ -4,13 +4,12 @@ import sys
 import tty
 import termios
 
-# --- Setup Serial Connection to Arduino Nano ESP32 ---
 SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
 
 try:
     esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
-    time.sleep(2) # Give the ESP32 a moment to reset upon connection
+    time.sleep(2) 
     print("Connected to ESP32!")
 except serial.SerialException as e:
     print(f"Error: Could not connect to ESP32: {e}")
@@ -62,7 +61,6 @@ try:
             print(f"Motor Command Sent: {command_name}          \r") 
 
 except KeyboardInterrupt:
-    # Catches Ctrl+C to ensure we don't leave the robot driving blindly
     print("\nForce Quit detected.")
 finally:
     # Failsafe shutdown
