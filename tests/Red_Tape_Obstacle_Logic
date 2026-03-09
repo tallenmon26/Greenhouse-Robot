@@ -5,7 +5,7 @@ import time
 import serial 
 import contextlib
 
-# --- Setup Serial Connection to ESP32 ---
+# Setup Serial Connection to ESP32
 SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
 try:
@@ -18,7 +18,6 @@ except serial.SerialException as e:
 FPS_LIMIT = 30  
 should_quit = False
 
-# --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 300
 MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 15 # How many frames of no line before we swap cameras
@@ -30,7 +29,6 @@ OBST_ROI_Y = (380 - OBST_ROI_H) // 2
 LINE_ROI_W, LINE_ROI_H = 200, 200
 LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
-# --- MULTI-DEVICE INITIALIZATION (DepthAI v3) ---
 device_infos = dai.Device.getAllAvailableDevices()
 num_cams = len(device_infos)
 print(f"Found {num_cams} OAK-D camera(s) on the hub.")
@@ -41,7 +39,6 @@ if num_cams == 0:
 active_cam_idx = 1  
 missing_line_frames = 0
 
-# We use ExitStack to safely manage multiple USB devices at once
 with contextlib.ExitStack() as stack:
     rgb_qs = []
     depth_qs = []
@@ -54,7 +51,7 @@ with contextlib.ExitStack() as stack:
         # 2. Create a pipeline uniquely bound to this device
         pipeline = stack.enter_context(dai.Pipeline(device))
         
-        # 3. Build Nodes (No XLinkOut needed in v3!)
+        # 3. Build Nodes
         left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
         right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
         rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
@@ -68,14 +65,10 @@ with contextlib.ExitStack() as stack:
         left.requestOutput((640, 400)).link(stereo.left)
         right.requestOutput((640, 400)).link(stereo.right)
         
-        # --- THE FIX: Create the queues FIRST ---
         # 4. Create device-scoped queues directly from the outputs
         rgb_qs.append(rgb_out.createOutputQueue(maxSize=4, blocking=False))
         depth_qs.append(stereo.depth.createOutputQueue(maxSize=4, blocking=False))
-        
-        # 5. NOW we can safely start the pipeline
         pipeline.start()
-        # ----------------------------------------
         
         print(f"Started Camera {i}: {info.getDeviceId()}")
         time.sleep(0.2) # Stagger opens slightly for USB stability
@@ -128,7 +121,6 @@ with contextlib.ExitStack() as stack:
                 # 4. Combine both masks to get all red pixels
                 thresh = cv2.bitwise_or(mask1, mask2)
                 
-                # SHOW THE MATH: This creates a second, black-and-white window.
                 cv2.imshow("Binary Mask (What OpenCV Sees)", thresh)
 
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -148,7 +140,6 @@ with contextlib.ExitStack() as stack:
                             line_detected = True
                             cv2.circle(rgb_frame, (int(M["m10"] / M["m00"]) + LINE_ROI_X, int(M["m01"] / M["m00"]) + LINE_ROI_Y), 5, (0, 0, 255), -1)
 
-                # --- SWAP LOGIC & MOTOR COMMANDS ---
                 command_to_send = b"STOP\n"
                 status = ""
 
@@ -172,14 +163,13 @@ with contextlib.ExitStack() as stack:
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
 
                 else:
-                    # WE LOST THE LINE!
                     missing_line_frames += 1
                     status = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
                     command_to_send = b"STOP\n"
                     
                     if missing_line_frames >= MISSING_LINE_THRESHOLD:
                         if num_cams > 1:
-                            # TRIGGER THE CAMERA SWAP
+                            # CAMERA SWAP
                             active_cam_idx = REAR_CAM_INDEX if active_cam_idx == FRONT_CAM_INDEX else FRONT_CAM_INDEX
                             missing_line_frames = 0
                             print(f"\n--- SWAPPING TO CAMERA {active_cam_idx} ---")
@@ -199,7 +189,7 @@ with contextlib.ExitStack() as stack:
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     should_quit = True
 
-# --- SAFE SHUTDOWN ---
+# SHUTDOWN 
 cv2.destroyAllWindows()
 if esp32:
     print("\nShutting down... sending final STOP command.")
