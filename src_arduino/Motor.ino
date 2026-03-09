@@ -1,51 +1,52 @@
 #include <SabertoothSimplified.h>
 
-// Use Serial0 for the Nano ESP32 pins (TX1/D1)
+// Initialize Sabertooth communication on Hardware Serial0 (TX1/D1)
 SabertoothSimplified ST(Serial0); 
 
-// --- SAFETY & TUNING ---
+// System Constraints & Timeouts
 unsigned long lastCommandTime = 0;
-const unsigned long WATCHDOG_TIMEOUT = 500; // Stop if no command received for 500ms
+const unsigned long WATCHDOG_TIMEOUT = 500; // ms threshold for serial timeout
 
-const int DRIVE_SPEED = 127; // Forward speed (0 to 127)
-const int TURN_SPEED = 30;  // Turning speed (0 to 127)
+// Motor Speed Parameters (Range: 0-127)
+const int DRIVE_SPEED = 127; 
+const int TURN_SPEED = 30;  
 
 void setup() {
-  Serial0.begin(9600);   // Talk to Sabertooth
-  Serial.begin(115200);  // Talk to Raspberry Pi (Match Python baud rate!)
+  Serial0.begin(9600);    // Sabertooth communication baud rate
+  Serial.begin(115200);   // Raspberry Pi serial communication baud rate
   
-  delay(2000); // Wait for Sabertooth to wake up
+  delay(2000); // Sabertooth hardware initialization delay
   
-  // Start with a strict stop
+  // Ensure motors are halted on startup
   ST.motor(1, 0);
   ST.motor(2, 0);
 }
 
 void loop() {
-  // 1. Check for incoming commands from the Pi
+  // Process incoming serial buffer
   if (Serial.available() > 0) {
     String command = Serial.readStringUntil('\n');
     command.trim();
     
-    // We received a command, reset the safety timer!
+    // Reset watchdog timer on successful read
     lastCommandTime = millis(); 
 
-    // 2. Execute the movement
+    // Parse command and actuate motors
     if (command == "FORWARD") {
       ST.motor(1, DRIVE_SPEED);
       ST.motor(2, DRIVE_SPEED);
     }
     else if (command == "BACKWARD") {
-      ST.motor(1, -DRIVE_SPEED); // Both motors in reverse
+      ST.motor(1, -DRIVE_SPEED); 
       ST.motor(2, -DRIVE_SPEED);
     } 
     else if (command == "LEFT") {
-      ST.motor(1, -TURN_SPEED); // Reverse left motor
-      ST.motor(2, TURN_SPEED);  // Forward right motor
+      ST.motor(1, -TURN_SPEED); 
+      ST.motor(2, TURN_SPEED);  
     } 
     else if (command == "RIGHT") {
-      ST.motor(1, TURN_SPEED);  // Forward left motor
-      ST.motor(2, -TURN_SPEED); // Reverse right motor
+      ST.motor(1, TURN_SPEED);  
+      ST.motor(2, -TURN_SPEED); 
     } 
     else if (command == "STOP") {
       ST.motor(1, 0);
@@ -53,8 +54,7 @@ void loop() {
     }
   }
 
-  // --- 3. THE WATCHDOG TIMER ---
-  // If 500ms pass without a word from the Pi, assume connection is lost and stop!
+  // Watchdog Timer: Halt motors if command timeout is exceeded
   if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
     ST.motor(1, 0);
     ST.motor(2, 0);
