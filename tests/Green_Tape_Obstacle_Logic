@@ -5,7 +5,6 @@ import time
 import serial 
 import contextlib
 
-# --- Setup Serial Connection to ESP32 ---
 SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
 try:
@@ -18,7 +17,6 @@ except serial.SerialException as e:
 FPS_LIMIT = 30  
 should_quit = False
 
-# --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 300
 MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 15 # How many frames of no line before we swap cameras
@@ -30,7 +28,6 @@ OBST_ROI_Y = (380 - OBST_ROI_H) // 2
 LINE_ROI_W, LINE_ROI_H = 200, 200
 LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
-# --- MULTI-DEVICE INITIALIZATION (DepthAI v3) ---
 device_infos = dai.Device.getAllAvailableDevices()
 num_cams = len(device_infos)
 print(f"Found {num_cams} OAK-D camera(s) on the hub.")
@@ -41,7 +38,6 @@ if num_cams == 0:
 active_cam_idx = 1  
 missing_line_frames = 0
 
-# We use ExitStack to safely manage multiple USB devices at once
 with contextlib.ExitStack() as stack:
     rgb_qs = []
     depth_qs = []
@@ -54,7 +50,7 @@ with contextlib.ExitStack() as stack:
         # 2. Create a pipeline uniquely bound to this device
         pipeline = stack.enter_context(dai.Pipeline(device))
         
-        # 3. Build Nodes (No XLinkOut needed in v3!)
+        # 3. Build Nodes 
         left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
         right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
         rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
@@ -72,7 +68,7 @@ with contextlib.ExitStack() as stack:
         rgb_qs.append(rgb_out.createOutputQueue(maxSize=4, blocking=False))
         depth_qs.append(stereo.depth.createOutputQueue(maxSize=4, blocking=False))
         
-        # 5. NOW we can safely start the pipeline
+        # 5. start the pipeline
         pipeline.start()
         
         print(f"Started Camera {i}: {info.getDeviceId()}")
@@ -98,7 +94,6 @@ with contextlib.ExitStack() as stack:
                 depth_frame = in_depth.getFrame()
                 rgb_frame = in_rgb.getCvFrame()
                 
-                # --- OBSTACLE DETECTION ---
                 obst_roi = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H, OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
                 valid_depths = obst_roi[obst_roi > 0]
                 distance = int(np.percentile(valid_depths, 25)) if valid_depths.size else 9999
@@ -107,7 +102,6 @@ with contextlib.ExitStack() as stack:
                 cv2.rectangle(rgb_frame, (OBST_ROI_X, OBST_ROI_Y), (OBST_ROI_X+OBST_ROI_W, OBST_ROI_Y+OBST_ROI_H), color_status, 2)
                 cv2.putText(rgb_frame, f"Dist: {distance}mm", (OBST_ROI_X, OBST_ROI_Y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_status, 2)
 
-                # --- LINE DETECTION (GREEN TAPE) ---
                 line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
                 
                 # 1. Convert the BGR image slice to HSV
@@ -120,7 +114,6 @@ with contextlib.ExitStack() as stack:
                 # 3. Create a single mask to get all green pixels
                 thresh = cv2.inRange(hsv_roi, lower_green, upper_green)
                 
-                # SHOW THE MATH: This creates a second, black-and-white window.
                 cv2.imshow("Binary Mask (What OpenCV Sees)", thresh)
 
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -140,7 +133,6 @@ with contextlib.ExitStack() as stack:
                             line_detected = True
                             cv2.circle(rgb_frame, (int(M["m10"] / M["m00"]) + LINE_ROI_X, int(M["m01"] / M["m00"]) + LINE_ROI_Y), 5, (0, 0, 255), -1)
 
-                # --- SWAP LOGIC & MOTOR COMMANDS ---
                 command_to_send = b"STOP\n"
                 status = ""
 
@@ -153,7 +145,7 @@ with contextlib.ExitStack() as stack:
                     command_to_send = b"STOP\n"
                     
                 elif line_detected:
-                    missing_line_frames = 0 # Reset counter because we see the line!
+                    missing_line_frames = 0 
                     
                     if active_cam_idx == FRONT_CAM_INDEX:
                         # --- FRONT CAMERA LOGIC (Index 1) ---
@@ -167,7 +159,6 @@ with contextlib.ExitStack() as stack:
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
                         
                 else:
-                    # WE LOST THE LINE!
                     missing_line_frames += 1
                     status = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
                     command_to_send = b"STOP\n"
