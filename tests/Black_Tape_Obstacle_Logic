@@ -7,7 +7,6 @@ import contextlib
 import signal
 import sys
 
-# --- Setup Serial Connection to ESP32 ---
 SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
 try:
@@ -20,7 +19,6 @@ except serial.SerialException as e:
 FPS_LIMIT = 30  
 should_quit = False
 
-# --- Graceful shutdown on Ctrl+C ---
 def handle_sigint(sig, frame):
     global should_quit
     print("\nCtrl+C detected — stopping...")
@@ -28,7 +26,6 @@ def handle_sigint(sig, frame):
 
 signal.signal(signal.SIGINT, handle_sigint)
 
-# --- TUNING PARAMETERS ---
 SAFE_DISTANCE_MM = 600
 BLACK_THRESHOLD = 90
 MIN_CONTOUR_AREA = 500
@@ -38,13 +35,12 @@ OBST_ROI_X, OBST_ROI_Y, OBST_ROI_W, OBST_ROI_H = 220, 60, 200, 140
 LINE_ROI_W, LINE_ROI_H = 200, 200
 LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
-# --- MULTI-DEVICE INITIALIZATION (DepthAI v3) ---
 device_infos = dai.Device.getAllAvailableDevices()
 num_cams = len(device_infos)
 print(f"Found {num_cams} OAK-D camera(s) on the hub.")
 
 if num_cams == 0:
-    raise RuntimeError("No cameras detected! Check your hub power and USB connections.")
+    raise RuntimeError("No cameras detected.")
 
 active_cam_idx = 1  
 missing_line_frames = 0
@@ -95,12 +91,12 @@ with contextlib.ExitStack() as stack:
                 depth_frame = in_depth.getFrame()
                 rgb_frame = in_rgb.getCvFrame()
                 
-                # --- OBSTACLE DETECTION ---
+                # OBSTACLE DETECTION
                 obst_roi = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H, OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
                 valid_depths = obst_roi[obst_roi > 0]
                 distance = int(np.percentile(valid_depths, 25)) if valid_depths.size else 9999
 
-                # --- LINE DETECTION ---
+                # LINE DETECTION 
                 line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
                 _, thresh = cv2.threshold(line_roi_slice[:, :, 1], BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -117,7 +113,6 @@ with contextlib.ExitStack() as stack:
                             error = int(M["m10"] / M["m00"]) - box_center_x
                             line_detected = True
 
-                # --- SWAP LOGIC & MOTOR COMMANDS ---
                 command_to_send = b"STOP\n"
                 status = ""
 
@@ -157,7 +152,7 @@ with contextlib.ExitStack() as stack:
                 cam_label = "FRONT CAM" if active_cam_idx == 0 else "REAR CAM"
                 print(f"\r[{cam_label}] {status:<30} | Dist: {distance}mm | Error: {error:+d}   ", end="", flush=True)
 
-# --- SAFE SHUTDOWN ---
+# Shutdown
 if esp32:
     print("\nShutting down... sending final STOP command.")
     esp32.write(b"STOP\n")
