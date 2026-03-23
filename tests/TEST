@@ -1,0 +1,323 @@
+import cv2
+import depthai as dai
+import numpy as np
+import time
+import serial
+import contextlib
+
+# Hardware Communication Protocols
+SERIAL_PORT = '/dev/ttyACM0'
+BAUD_RATE = 115200
+
+try:
+    esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+    time.sleep(2)
+except serial.SerialException as e:
+    print(f"Warning: Serial initialization failed: {e}")
+    esp32 = None
+
+FPS_LIMIT = 30
+should_quit = False
+
+# System Parameters & Constraints
+SAFE_DISTANCE_MM = 300
+MIN_CONTOUR_AREA = 500
+MISSING_LINE_THRESHOLD = 15  # Frame threshold to trigger camera failover
+
+OBST_ROI_W, OBST_ROI_H = 100, 100
+OBST_ROI_X = (640 - OBST_ROI_W) // 2
+OBST_ROI_Y = (380 - OBST_ROI_H) // 2
+
+LINE_ROI_W, LINE_ROI_H = 200, 200
+LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Red Tape Detection
+# ---------------------------------------------------------------------------
+# CLAHE (clipLimit, tileGridSize) is created once and reused every frame.
+# Creating it inside the loop would waste memory on repeated allocations.
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+
+def get_adaptive_red_mask(roi_bgr: np.ndarray) -> np.ndarray:
+    """
+    Detects red tape robustly under variable lighting conditions.
+
+    Strategy
+    --------
+    Layer 1 – CLAHE on the HSV Value channel
+        Contrast Limited Adaptive Histogram Equalization is applied locally so
+        that both under-exposed (shadow) and over-exposed (direct sunlight)
+        regions are brought into a usable tonal range before any colour check.
+
+    Layer 2 – Statistically derived S / V thresholds (HSV mask)
+        Rather than hard-coding saturation and brightness floors, the per-frame
+        mean of each channel inside the ROI is used to derive thresholds that
+        scale automatically.  This keeps the mask valid whether the tape is lit
+        by a single overhead lamp or full outdoor sun.
+
+        s_thresh  = max(40,  mean_S × 0.60)   — relaxes in low-sat scenes
+        v_low     = max(30,  mean_V × 0.30)   — floor for dark frames
+        v_high    = min(255, mean_V × 1.80)   — ceiling for bright frames
+
+        The hue range stays fixed (0–10 and 160–180) because red hue is
+        relatively stable across lighting; only S and V shift significantly.
+
+    Layer 3 – LAB A-channel Otsu mask
+        In CIE LAB the A channel encodes green (−) to red (+) perceptually,
+        independent of luminance.  Otsu's method finds the optimal binary
+        split on each frame's own histogram, so it adapts to the scene
+        without any manual threshold.
+
+    Final mask = HSV ∩ LAB  →  morphological open (noise removal)  →  close
+        (gap filling).  The intersection discards false positives that only one
+        method would have triggered; morphology handles sensor noise and tape
+        edge aliasing.
+
+    Parameters
+    ----------
+    roi_bgr : np.ndarray
+        Cropped BGR image patch (the LINE_ROI slice).
+
+    Returns
+    -------
+    np.ndarray
+        Single-channel uint8 binary mask, 255 = red tape, 0 = background.
+    """
+
+    # ------------------------------------------------------------------
+    # Layer 1: CLAHE-equalised HSV space
+    # ------------------------------------------------------------------
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+
+    # Equalise brightness locally so shadows / glare don't break the mask
+    v_eq = _clahe.apply(v)
+    hsv_eq = cv2.merge([h, s, v_eq])
+
+    # ------------------------------------------------------------------
+    # Layer 2: Statistically adaptive S / V thresholds
+    # ------------------------------------------------------------------
+    s_mean = float(np.mean(s))
+    v_mean = float(np.mean(v_eq))
+
+    s_thresh = int(max(40,  s_mean * 0.60))
+    v_low    = int(max(30,  v_mean * 0.30))
+    v_high   = int(min(255, v_mean * 1.80))
+
+    # Red hue wraps around 0° — two inRange calls cover both sides
+    lower_red_1 = np.array([0,   s_thresh, v_low],  dtype=np.uint8)
+    upper_red_1 = np.array([10,  255,      v_high], dtype=np.uint8)
+    lower_red_2 = np.array([160, s_thresh, v_low],  dtype=np.uint8)
+    upper_red_2 = np.array([180, 255,      v_high], dtype=np.uint8)
+
+    mask_hsv = cv2.bitwise_or(
+        cv2.inRange(hsv_eq, lower_red_1, upper_red_1),
+        cv2.inRange(hsv_eq, lower_red_2, upper_red_2),
+    )
+
+    # ------------------------------------------------------------------
+    # Layer 3: LAB A-channel with Otsu auto-threshold
+    # ------------------------------------------------------------------
+    lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+    a_channel = lab[:, :, 1]   # 128 = neutral, >128 = reddish
+
+    # Otsu selects the threshold from this frame's histogram automatically
+    _, mask_lab = cv2.threshold(
+        a_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # ------------------------------------------------------------------
+    # Combine and clean up
+    # ------------------------------------------------------------------
+    combined = cv2.bitwise_and(mask_hsv, mask_lab)
+
+    # Elliptical kernel fits round tape cross-sections better than a square
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+    # Opening:  erode then dilate — removes isolated noise pixels
+    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
+
+    # Closing: dilate then erode — fills small holes inside the tape blob
+    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+
+    return combined
+
+
+# ---------------------------------------------------------------------------
+# DepthAI Multi-Device Configuration
+# ---------------------------------------------------------------------------
+device_infos = dai.Device.getAllAvailableDevices()
+num_cams = len(device_infos)
+print(f"Initialized hub. Devices detected: {num_cams}")
+
+if num_cams == 0:
+    raise RuntimeError("Hardware Error: Zero OAK-D devices enumerated.")
+
+active_cam_idx = 1
+missing_line_frames = 0
+
+# Context manager for safe multi-device USB allocation
+with contextlib.ExitStack() as stack:
+    rgb_qs = []
+    depth_qs = []
+
+    # Initialize connected DepthAI devices
+    for i, info in enumerate(device_infos):
+        device = stack.enter_context(dai.Device(info))
+        pipeline = stack.enter_context(dai.Pipeline(device))
+
+        # Configure stereo and RGB nodes
+        left    = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+        right   = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+        rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+
+        rgb_out = rgb_cam.requestOutput((640, 480), dai.ImgFrame.Type.BGR888p)
+
+        stereo = pipeline.create(dai.node.StereoDepth)
+        stereo.setLeftRightCheck(True)
+        stereo.setSubpixel(False)
+
+        left.requestOutput((640, 400)).link(stereo.left)
+        right.requestOutput((640, 400)).link(stereo.right)
+
+        # Non-blocking queues prevent USB buffer overflow
+        rgb_qs.append(rgb_out.createOutputQueue(maxSize=4, blocking=False))
+        depth_qs.append(stereo.depth.createOutputQueue(maxSize=4, blocking=False))
+
+        pipeline.start()
+        print(f"Pipeline active for Device {i} [ID: {info.getDeviceId()}]")
+        time.sleep(0.2)  # Hardware stabilization delay
+
+    print("\nSystem active. Awaiting user interrupt (q).")
+    last_frame_time = time.time()
+
+    while not should_quit:
+        current_time = time.time()
+        if current_time - last_frame_time < (1.0 / FPS_LIMIT):
+            time.sleep(0.001)
+            continue
+        last_frame_time = current_time
+
+        # Drain all device queues; only process the active camera stream
+        for i in range(num_cams):
+            in_depth = depth_qs[i].tryGet()
+            in_rgb   = rgb_qs[i].tryGet()
+
+            if i == active_cam_idx and in_depth is not None and in_rgb is not None:
+                depth_frame = in_depth.getFrame()
+                rgb_frame   = in_rgb.getCvFrame()
+
+                # ----------------------------------------------------------
+                # Depth Processing & Obstacle Detection
+                # ----------------------------------------------------------
+                obst_roi     = depth_frame[OBST_ROI_Y:OBST_ROI_Y+OBST_ROI_H,
+                                           OBST_ROI_X:OBST_ROI_X+OBST_ROI_W]
+                valid_depths = obst_roi[obst_roi > 0]
+                distance     = int(np.percentile(valid_depths, 25)) if valid_depths.size else 9999
+
+                color_status = (0, 0, 255) if (0 < distance < SAFE_DISTANCE_MM) else (0, 255, 0)
+                cv2.rectangle(rgb_frame,
+                              (OBST_ROI_X, OBST_ROI_Y),
+                              (OBST_ROI_X+OBST_ROI_W, OBST_ROI_Y+OBST_ROI_H),
+                              color_status, 2)
+                cv2.putText(rgb_frame, f"Dist: {distance}mm",
+                            (OBST_ROI_X, OBST_ROI_Y-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_status, 2)
+
+                # ----------------------------------------------------------
+                # Vision Processing & Trajectory Calculation
+                # ----------------------------------------------------------
+                line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H,
+                                           LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
+
+                # Adaptive red mask — handles shadows, glare, mixed lighting
+                thresh = get_adaptive_red_mask(line_roi_slice)
+
+                cv2.imshow("Binary Mask", thresh)
+
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                line_detected = False
+                error         = 0
+                box_center_x  = LINE_ROI_W // 2
+
+                cv2.rectangle(rgb_frame,
+                              (LINE_ROI_X, LINE_ROI_Y),
+                              (LINE_ROI_X+LINE_ROI_W, LINE_ROI_Y+LINE_ROI_H),
+                              (0, 255, 255), 2)
+
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(c) > MIN_CONTOUR_AREA:
+                        M = cv2.moments(c)
+                        if M["m00"] != 0:
+                            cx    = int(M["m10"] / M["m00"])
+                            cy    = int(M["m01"] / M["m00"])
+                            error = cx - box_center_x
+                            line_detected = True
+                            cv2.circle(rgb_frame,
+                                       (cx + LINE_ROI_X, cy + LINE_ROI_Y),
+                                       5, (0, 0, 255), -1)
+
+                # ----------------------------------------------------------
+                # State Machine & Actuation Logic
+                # ----------------------------------------------------------
+                command_to_send = b"STOP\n"
+                status = ""
+
+                FRONT_CAM_INDEX = 1
+                REAR_CAM_INDEX  = 0
+
+                if 0 < distance < SAFE_DISTANCE_MM:
+                    status          = "STOP! OBSTACLE"
+                    command_to_send = b"STOP\n"
+
+                elif line_detected:
+                    missing_line_frames = 0
+                    if active_cam_idx == FRONT_CAM_INDEX:
+                        if error < -15:   status, command_to_send = "Turn LEFT",  b"LEFT\n"
+                        elif error > 15:  status, command_to_send = "Turn RIGHT", b"RIGHT\n"
+                        else:             status, command_to_send = "FORWARD",    b"FORWARD\n"
+                    elif active_cam_idx == REAR_CAM_INDEX:
+                        if error < -15:   status, command_to_send = "Reverse LEFT",  b"LEFT\n"
+                        elif error > 15:  status, command_to_send = "Reverse RIGHT", b"RIGHT\n"
+                        else:             status, command_to_send = "BACKWARD",      b"BACKWARD\n"
+
+                else:
+                    # Trajectory loss — count frames and failover if needed
+                    missing_line_frames += 1
+                    status          = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
+                    command_to_send = b"STOP\n"
+
+                    if missing_line_frames >= MISSING_LINE_THRESHOLD:
+                        if num_cams > 1:
+                            active_cam_idx      = REAR_CAM_INDEX if active_cam_idx == FRONT_CAM_INDEX else FRONT_CAM_INDEX
+                            missing_line_frames = 0
+                            print(f"\n[SYSTEM] Executing failover. Active feed: Camera {active_cam_idx}")
+                            time.sleep(0.5)
+                        else:
+                            status = "END OF TAPE. STOPPED."
+
+                if esp32:
+                    esp32.write(command_to_send)
+
+                # Render telemetry overlay
+                cam_label = "FRONT CAM" if active_cam_idx == FRONT_CAM_INDEX else "REAR CAM"
+                cv2.putText(rgb_frame, cam_label, (450, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+                cv2.putText(rgb_frame, status, (10, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
+
+                cv2.imshow("Robot View", rgb_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    should_quit = True
+
+# System Teardown
+cv2.destroyAllWindows()
+if esp32:
+    print("\nInitiating safe shutdown sequence...")
+    esp32.write(b"STOP\n")
+    time.sleep(0.1)
+    esp32.close()
+    print("Actuators disengaged. Offline.")
