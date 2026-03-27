@@ -14,11 +14,11 @@ const int LIDAR_TX = D7;
 // System constraints and watchdog timing parameters
 unsigned long lastCommandTime = 0;
 unsigned long lastLidarTime = 0;
-const unsigned long WATCHDOG_TIMEOUT = 10000; // Communication timeout threshold in milliseconds
+const unsigned long WATCHDOG_TIMEOUT = 500; // Communication timeout threshold in milliseconds
 
 // Kinematic constraints (Amplitude range: 0-127)
 const int DRIVE_SPEED = 127; 
-const int TURN_SPEED = 127;  
+const int TURN_SPEED = 63;  
 const byte request[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A}; 
 float currentDist = 0;
 
