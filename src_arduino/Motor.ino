@@ -1,6 +1,9 @@
 #include <SabertoothSimplified.h>
+// 1. Create a new hardware serial port
+HardwareSerial SaberSerial(2); 
 
-SabertoothSimplified ST(Serial0);
+// 2. Tell the Sabertooth library to use this new port
+SabertoothSimplified ST(SaberSerial);
 
 const int Fan1     = D2;
 const int Fan2     = D3;
@@ -46,7 +49,7 @@ void readLidar() {
 }
 
 void setup() {
-  Serial0.begin(9600);
+  SaberSerial.begin(9600, SERIAL_8N1, -1, D8);
   Serial.begin(115200);
   setupLidar();
 
@@ -58,7 +61,7 @@ void setup() {
 
   delay(2000);
   strcpy(cmdBuf, "STOP");
-  handleCommand();        
+  handleCommand();   
   ST.motor(1, 0);
   ST.motor(2, 0);
 }
