@@ -57,7 +57,8 @@ void setup() {
   digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
 
   delay(2000);
-
+  strcpy(cmdBuf, "STOP");
+  handleCommand();   
   ST.motor(1, 0);
   ST.motor(2, 0);
 }
@@ -129,6 +130,7 @@ void loop() {
     ST.motor(2, 0);
     digitalWrite(RPWM_PIN, LOW);  digitalWrite(LPWM_PIN, LOW);
     digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
+    lastCommandTime = millis();
   }
 
   // LiDAR poll
