@@ -163,10 +163,12 @@ with contextlib.ExitStack() as stack:
                         elif error > 15: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
                     elif active_cam_idx == REAR_CAM_INDEX:
-                        if error < -60: status, command_to_send = "Hard REV L", b"RIGHT\n" 
-                        elif error > 60: status, command_to_send = "Hard REV R", b"LEFT\n"
-                        elif error < -15: status, command_to_send = "Arc REV L", b"ARC_REV_LEFT\n"
-                        elif error > 15: status, command_to_send = "Arc REV R", b"ARC_REV_RIGHT\n"
+                        if error < -60: status, command_to_send = "Hard REV L", b"LEFT\n" 
+                        elif error > 60: status, command_to_send = "Hard REV R", b"RIGHT\n"
+                        elif error < -35: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
+                        elif error > 35: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        elif error < -15: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
+                        elif error > 15: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
                 else:
                     # Handle trajectory loss and execute failover sequence
