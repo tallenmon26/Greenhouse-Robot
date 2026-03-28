@@ -124,6 +124,39 @@ void handleCommand() {
     digitalWrite(RPWM_PIN, LOW);  digitalWrite(LPWM_PIN, HIGH);
     digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
   }
+  else if (strcmp(cmdBuf, "ARC_LEFT") == 0) {
+    targetSpeedM1 = TURN_SPEED;  // Inside wheel moves forward, but slower
+    targetSpeedM2 = DRIVE_SPEED; // Outside wheel pushes at full speed
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
+  else if (strcmp(cmdBuf, "ARC_RIGHT") == 0) {
+    targetSpeedM1 = DRIVE_SPEED; // Outside wheel pushes at full speed
+    targetSpeedM2 = TURN_SPEED;  // Inside wheel moves forward, but slower
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
+  // --- TIGHT FORWARD ARCS (Less forward momentum!) ---
+  else if (strcmp(cmdBuf, "TIGHT_ARC_LEFT") == 0) {
+    targetSpeedM1 = 0;           // Inside wheel stops completely
+    targetSpeedM2 = TURN_SPEED;  // Outside wheel pushes gently
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
+  else if (strcmp(cmdBuf, "TIGHT_ARC_RIGHT") == 0) {
+    targetSpeedM1 = TURN_SPEED;  // Outside wheel pushes gently
+    targetSpeedM2 = 0;           // Inside wheel stops completely
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
+
+  // --- REVERSE ARCS ---
+  else if (strcmp(cmdBuf, "ARC_REV_LEFT") == 0) {
+    targetSpeedM1 = -TURN_SPEED;  // Left wheel slow reverse
+    targetSpeedM2 = -DRIVE_SPEED; // Right wheel fast reverse (pushes tail left)
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
+  else if (strcmp(cmdBuf, "ARC_REV_RIGHT") == 0) {
+    targetSpeedM1 = -DRIVE_SPEED; // Left wheel fast reverse (pushes tail right)
+    targetSpeedM2 = -TURN_SPEED;  // Right wheel slow reverse
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
   else if (strcmp(cmdBuf, "FAN") == 0) {
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
