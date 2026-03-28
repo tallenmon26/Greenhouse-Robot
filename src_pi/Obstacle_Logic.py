@@ -29,7 +29,7 @@ OBST_ROI_X = (640 - OBST_ROI_W) // 2
 OBST_ROI_Y = (380 - OBST_ROI_H) // 2  
 
 LINE_ROI_W, LINE_ROI_H = 400, 200
-LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 180
+LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
 # DepthAI Multi-Device Configuration
 device_infos = dai.Device.getAllAvailableDevices()
