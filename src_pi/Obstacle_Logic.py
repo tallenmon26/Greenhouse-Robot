@@ -28,8 +28,8 @@ OBST_ROI_W, OBST_ROI_H = 100, 100
 OBST_ROI_X = (640 - OBST_ROI_W) // 2  
 OBST_ROI_Y = (380 - OBST_ROI_H) // 2  
 
-LINE_ROI_W, LINE_ROI_H = 200, 200
-LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
+LINE_ROI_W, LINE_ROI_H = 400, 200
+LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 180
 
 # DepthAI Multi-Device Configuration
 device_infos = dai.Device.getAllAvailableDevices()
@@ -155,14 +155,17 @@ with contextlib.ExitStack() as stack:
                 elif line_detected:
                     missing_line_frames = 0 
                     if active_cam_idx == FRONT_CAM_INDEX:
-                        if error < -15: status, command_to_send = "Turn LEFT", b"LEFT\n"
-                        elif error > 15: status, command_to_send = "Turn RIGHT", b"RIGHT\n"
+                        if error < -60: status, command_to_send = "Hard LEFT", b"LEFT\n"
+                        elif error > 60: status, command_to_send = "Hard RIGHT", b"RIGHT\n"
+                        elif error < -15: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
+                        elif error > 15: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
                     elif active_cam_idx == REAR_CAM_INDEX:
-                        if error < -15: status, command_to_send = "Reverse LEFT", b"LEFT\n" 
-                        elif error > 15: status, command_to_send = "Reverse RIGHT", b"RIGHT\n"
+                        if error < -60: status, command_to_send = "Hard LEFT", b"LEFT\n"
+                        elif error > 60: status, command_to_send = "Hard RIGHT", b"RIGHT\n"
+                        elif error < -15: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
+                        elif error > 15: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
-
                 else:
                     # Handle trajectory loss and execute failover sequence
                     missing_line_frames += 1
