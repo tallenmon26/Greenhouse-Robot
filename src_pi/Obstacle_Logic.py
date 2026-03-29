@@ -182,28 +182,40 @@ with contextlib.ExitStack() as stack:
                     throttle_speed = int(np.interp(cy, [0, LINE_ROI_H], [127, 40]))
                     if esp32: esp32.write(f"SPD:{throttle_speed}\n".encode())
                     
-                    # THE NEW LOGIC: Look at Error OR Angle!
+                    # ==========================================
+                    # FRONT CAMERA LOGIC
+                    # ==========================================
                     if active_cam_idx == FRONT_CAM_INDEX:
-                        if error < -60 or angle < -45: status, command_to_send = "Hard LEFT", b"LEFT\n"
-                        elif error > 60 or angle > 45: status, command_to_send = "Hard RIGHT", b"RIGHT\n"
                         
-                        elif error < -35 or angle < -25: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
-                        elif error > 35 or angle > 25: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        # 1. EDGE PROTECTION: Position completely overrides angle! 
+                        # If it's falling off the screen, drop everything and chase it.
+                        if error < -100: status, command_to_send = "Edge LEFT", b"LEFT\n"
+                        elif error > 100: status, command_to_send = "Edge RIGHT", b"RIGHT\n"
                         
-                        elif error < -15 or angle < -10: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
-                        elif error > 15 or angle > 10: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
+                        # 2. VECTOR TRACKING: Now we safely blend position and angle
+                        elif error < -50 or angle < -50: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
+                        elif error > 50 or angle > 50: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        
+                        elif error < -15 or angle < -15: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
+                        elif error > 15 or angle > 15: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
                         
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
                         
+                    # ==========================================
+                    # REAR CAMERA LOGIC
+                    # ==========================================
                     elif active_cam_idx == REAR_CAM_INDEX:
-                        if error < -60 or angle < -45: status, command_to_send = "Hard REV L", b"LEFT\n" 
-                        elif error > 60 or angle > 45: status, command_to_send = "Hard REV R", b"RIGHT\n"
                         
-                        elif error < -35 or angle < -25: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
-                        elif error > 35 or angle > 25: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        # Edge Protection (Inverted for reverse)
+                        if error < -100: status, command_to_send = "Edge REV L", b"RIGHT\n" 
+                        elif error > 100: status, command_to_send = "Edge REV R", b"LEFT\n"
                         
-                        elif error < -15 or angle < -10: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
-                        elif error > 15 or angle > 10: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
+                        # Vector Tracking (Inverted for reverse)
+                        elif error < -50 or angle < -50: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
+                        elif error > 50 or angle > 50: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        
+                        elif error < -15 or angle < -15: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
+                        elif error > 15 or angle > 15: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
                         
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
                 else:
