@@ -157,6 +157,16 @@ void handleCommand() {
     targetSpeedM2 = -TURN_SPEED;  // Right wheel slow reverse
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
+  else if (strcmp(cmdBuf, "TIGHT_ARC_REV_LEFT") == 0) {
+    targetSpeedM1 = 0;            // Inside wheel stops completely
+    targetSpeedM2 = -TURN_SPEED;  // Outside wheel reverses gently (pushes tail left)
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
+  else if (strcmp(cmdBuf, "TIGHT_ARC_REV_RIGHT") == 0) {
+    targetSpeedM1 = -TURN_SPEED;  // Outside wheel reverses gently (pushes tail right)
+    targetSpeedM2 = 0;            // Inside wheel stops completely
+    digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
+  }
   else if (strcmp(cmdBuf, "FAN") == 0) {
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
