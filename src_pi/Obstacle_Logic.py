@@ -225,8 +225,8 @@ with contextlib.ExitStack() as stack:
                         elif error > 100: status, command_to_send = "Edge REV R", b"LEFT\n"
                         
                         # Vector Tracking (Inverted for reverse)
-                        elif error < -50 or angle < -50: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
-                        elif error > 50 or angle > 50: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        elif error < -50 or angle < -50: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_RIGHT\n"
+                        elif error > 50 or angle > 50: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_LEFT\n"
                         
                         elif error < -15 or angle < -15: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
                         elif error > 15 or angle > 15: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
