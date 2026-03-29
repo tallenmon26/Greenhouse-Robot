@@ -134,11 +134,34 @@ with contextlib.ExitStack() as stack:
                 if contours:
                     c = max(contours, key=cv2.contourArea)
                     if cv2.contourArea(c) > MIN_CONTOUR_AREA:
+                        # 1. Position (Where is it?)
                         M = cv2.moments(c)
                         if M["m00"] != 0:
-                            error = int(M["m10"] / M["m00"]) - box_center_x
+                            cx = int(M["m10"] / M["m00"])
+                            cy = int(M["m01"] / M["m00"])
+                            error = cx - box_center_x
+                            
+                            # 2. Vector Angle (Where is it pointing?)
+                            # Find the extreme top and bottom pixels of the contour
+                            topmost = tuple(c[c[:,:,1].argmin()][0])
+                            bottommost = tuple(c[c[:,:,1].argmax()][0])
+                            
+                            # Calculate the slope angle (0 = perfectly straight up)
+                            dx = topmost[0] - bottommost[0]
+                            dy = bottommost[1] - topmost[1] 
+                            if dy == 0: dy = 1 # Prevent division by zero
+                            
+                            angle = int(np.degrees(np.arctan2(dx, dy)))
+                            
                             line_detected = True
-                            cv2.circle(rgb_frame, (int(M["m10"] / M["m00"]) + LINE_ROI_X, int(M["m01"] / M["m00"]) + LINE_ROI_Y), 5, (0, 0, 255), -1)
+                            
+                            # Draw the center point (Red Dot)
+                            cv2.circle(rgb_frame, (cx + LINE_ROI_X, cy + LINE_ROI_Y), 5, (0, 0, 255), -1)
+                            # Draw the Vector Line (Green Line)
+                            cv2.line(rgb_frame, 
+                                     (bottommost[0] + LINE_ROI_X, bottommost[1] + LINE_ROI_Y), 
+                                     (topmost[0] + LINE_ROI_X, topmost[1] + LINE_ROI_Y), 
+                                     (0, 255, 0), 3)
 
                 # State Machine & Actuation Logic
                 command_to_send = b"STOP\n"
@@ -154,21 +177,34 @@ with contextlib.ExitStack() as stack:
                     
                 elif line_detected:
                     missing_line_frames = 0 
+                    
+                    # The Throttle: Slow down based on Y-axis
+                    throttle_speed = int(np.interp(cy, [0, LINE_ROI_H], [127, 40]))
+                    if esp32: esp32.write(f"SPD:{throttle_speed}\n".encode())
+                    
+                    # THE NEW LOGIC: Look at Error OR Angle!
                     if active_cam_idx == FRONT_CAM_INDEX:
-                        if error < -30: status, command_to_send = "Hard LEFT", b"LEFT\n"
-                        elif error > 30: status, command_to_send = "Hard RIGHT", b"RIGHT\n"
-                        elif error < -15: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
-                        elif error > 15: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
-                        elif error < -10: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
-                        elif error > 10: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
+                        if error < -60 or angle < -45: status, command_to_send = "Hard LEFT", b"LEFT\n"
+                        elif error > 60 or angle > 45: status, command_to_send = "Hard RIGHT", b"RIGHT\n"
+                        
+                        elif error < -35 or angle < -25: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
+                        elif error > 35 or angle > 25: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        
+                        elif error < -15 or angle < -10: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
+                        elif error > 15 or angle > 10: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
+                        
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
+                        
                     elif active_cam_idx == REAR_CAM_INDEX:
-                        if error < -30: status, command_to_send = "Hard REV L", b"LEFT\n" 
-                        elif error > 30: status, command_to_send = "Hard REV R", b"RIGHT\n"
-                        elif error < -15: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
-                        elif error > 15: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
-                        elif error < -10: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
-                        elif error > 10: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
+                        if error < -60 or angle < -45: status, command_to_send = "Hard REV L", b"LEFT\n" 
+                        elif error > 60 or angle > 45: status, command_to_send = "Hard REV R", b"RIGHT\n"
+                        
+                        elif error < -35 or angle < -25: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
+                        elif error > 35 or angle > 25: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
+                        
+                        elif error < -15 or angle < -10: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
+                        elif error > 15 or angle > 10: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
+                        
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
                 else:
                     # Handle trajectory loss and execute failover sequence
