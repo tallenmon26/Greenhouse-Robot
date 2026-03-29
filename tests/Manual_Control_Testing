@@ -54,11 +54,6 @@ try:
         if key in key_mapping:
             command = key_mapping[key]
             esp32.write(command)
-            
-            # Print the command to the terminal for visual feedback
-            command_name = command.decode().strip()
-            # The \r keeps the print statement neat while the terminal is in raw mode
-            print(f"Motor Command Sent: {command_name}          \r") 
 
 except KeyboardInterrupt:
     print("\nForce Quit detected.")
