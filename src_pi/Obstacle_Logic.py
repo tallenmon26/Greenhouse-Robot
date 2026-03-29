@@ -33,8 +33,11 @@ LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
 # DepthAI Multi-Device Configuration
 device_infos = dai.Device.getAllAvailableDevices()
+if len(device_infos) > 2:
+    device_infos = device_infos[:2]
+
 num_cams = len(device_infos)
-print(f"Initialized hub. Devices detected: {num_cams}")
+print(f"Initialized hub. Navigation Devices detected: {num_cams}")
 
 if num_cams == 0:
     raise RuntimeError("Hardware Error: Zero OAK-D devices enumerated.")
@@ -104,25 +107,36 @@ with contextlib.ExitStack() as stack:
                 cv2.rectangle(rgb_frame, (OBST_ROI_X, OBST_ROI_Y), (OBST_ROI_X+OBST_ROI_W, OBST_ROI_Y+OBST_ROI_H), color_status, 2)
                 cv2.putText(rgb_frame, f"Dist: {distance}mm", (OBST_ROI_X, OBST_ROI_Y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_status, 2)
 
-                # Vision Processing & Trajectory Calculation
+                # --- VISION PROCESSING ---
                 line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
                 
-                # Apply HSV transformation and aggregate red hue boundaries
-                hsv_roi = cv2.cvtColor(line_roi_slice, cv2.COLOR_BGR2HSV)
+                # 1. BLUR: Soften the image to reduce harsh lighting glare on the tape
+                blurred_roi = cv2.GaussianBlur(line_roi_slice, (9, 9), 0)
+                hsv_roi = cv2.cvtColor(blurred_roi, cv2.COLOR_BGR2HSV)
                 
-                lower_red_1 = np.array([0, 100, 100])
+                # 2. RELAXED HSV: Lowered the middle and last numbers (Saturation & Value) 
+                # from 100 down to 60 so it catches faded, shiny, or shadowed reds!
+                lower_red_1 = np.array([0, 60, 60]) 
                 upper_red_1 = np.array([10, 255, 255])
                 mask1 = cv2.inRange(hsv_roi, lower_red_1, upper_red_1)
                 
-                lower_red_2 = np.array([160, 100, 100])
+                lower_red_2 = np.array([160, 60, 60])
                 upper_red_2 = np.array([180, 255, 255])
                 mask2 = cv2.inRange(hsv_roi, lower_red_2, upper_red_2)
                 
                 thresh = cv2.bitwise_or(mask1, mask2)
                 
-                # Diagnostic output window
-                cv2.imshow("Binary Mask", thresh)
+                # 3. MORPHOLOGY: The Digital Steamroller!
+                # Create a 5x5 pixel "brush"
+                kernel = np.ones((5, 5), np.uint8)
+                
+                # "OPEN" removes random white static/noise in the black background
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+                # "CLOSE" fills in the black holes inside our white tape line
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
+                # Show the newly cleaned mask!
+                cv2.imshow("Binary Mask", thresh)
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 line_detected = False
