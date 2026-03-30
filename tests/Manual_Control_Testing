@@ -3,6 +3,7 @@ import time
 import sys
 import tty
 import termios
+import select
 
 SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
@@ -28,12 +29,16 @@ key_mapping = {
 }
 
 def get_key():
-    """Reads a single keypress from the Pi's terminal without waiting for the Enter key."""
+    """NON-BLOCKING key reader so the buffer flush can run constantly!"""
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(sys.stdin.fileno())
-        ch = sys.stdin.read(1)
+        # Check if a key was pressed, but only wait 0.05 seconds!
+        if select.select([sys.stdin], [], [], 0.05)[0]:
+            ch = sys.stdin.read(1)
+        else:
+            ch = '' # No key was pressed
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     return ch
@@ -49,7 +54,12 @@ print("============================\n")
 
 try:
     while True:
-        key = get_key().lower() # .lower() makes it work even if Caps Lock is on
+        # THE FIX: Empty the LiDAR trash 20 times a second!
+        esp32.reset_input_buffer()
+        
+        key = get_key().lower() 
+        if key == '': 
+            continue # If no key was pressed, immediately restart the loop to clear the buffer again!
         
         if key == 'q':
             print("\nQuitting...")
