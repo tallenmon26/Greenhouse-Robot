@@ -54,15 +54,23 @@ print("============================\n")
 
 try:
     while True:
-        # THE FIX: Empty the LiDAR trash 20 times a second!
-        esp32.reset_input_buffer()
+        # 1. READ INCOMING SERIAL DATA (Instead of throwing it away)
+        while esp32.in_waiting > 0:
+            try:
+                line = esp32.readline().decode('utf-8').strip()
+                if line:
+                    # Print in-place using \r so it doesn't spam a million lines
+                    print(f"\r{line}                            ", end="", flush=True)
+            except UnicodeDecodeError:
+                pass # Ignore random corrupted bytes
         
+        # 2. HANDLE KEYBOARD INPUT
         key = get_key().lower() 
         if key == '': 
-            continue # If no key was pressed, immediately restart the loop to clear the buffer again!
+            continue # If no key was pressed, immediately restart the loop to check serial again!
         
         if key == 'q':
-            print("\nQuitting...")
+            print("\n\nQuitting...")
             esp32.write(b"STOP\n")
             break
             
@@ -71,7 +79,7 @@ try:
             esp32.write(command)
 
 except KeyboardInterrupt:
-    print("\nForce Quit detected.")
+    print("\n\nForce Quit detected.")
 finally:
     # Failsafe shutdown
     esp32.write(b"STOP\n")
