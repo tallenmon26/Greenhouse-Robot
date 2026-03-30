@@ -28,7 +28,7 @@ OBST_ROI_W, OBST_ROI_H = 200, 100
 OBST_ROI_X = (640 - OBST_ROI_W) // 2  
 OBST_ROI_Y = 0
 
-LINE_ROI_W, LINE_ROI_H = 400, 200
+LINE_ROI_W, LINE_ROI_H = 200, 200
 LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
 
 # DepthAI Multi-Device Configuration
@@ -248,6 +248,7 @@ with contextlib.ExitStack() as stack:
                             status = "END OF TAPE. STOPPED."
 
                 if esp32:
+                    esp32.reset_input_buffer()
                     esp32.write(command_to_send)
 
                 # Render active camera telemetry
