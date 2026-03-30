@@ -21,6 +21,9 @@ key_mapping = {
     's': b"BACKWARD\n",
     'a': b"LEFT\n",
     'd': b"RIGHT\n",
+    'i': b"UP\n",
+    'k': b"DOWN\n",
+    'f': b"FAN\n",
     ' ': b"STOP\n"  # Spacebar to hit the brakes
 }
 
@@ -38,6 +41,8 @@ def get_key():
 print("\n=== Manual Robot Control ===")
 print(" W = Forward  |  S = Backward")
 print(" A = Left     |  D = Right")
+print(" I = UP       |  K = DOWN")
+print(" F = FAN")
 print(" [Spacebar] = STOP")
 print(" Q = Quit Program")
 print("============================\n")
