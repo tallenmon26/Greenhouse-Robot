@@ -28,6 +28,14 @@ key_mapping = {
     ' ': b"STOP\n"  # Spacebar to hit the brakes
 }
 
+# --- Vertical System Variables ---
+target_height = 0.0
+current_height = 0.0
+is_adjusting_height = False
+height_tolerance = 0.1  # Stops the motor if within 0.1 units of the target to prevent jitter
+last_auto_cmd = b""
+last_auto_cmd_time = 0
+
 def get_key():
     """NON-BLOCKING key reader so the buffer flush can run constantly!"""
     fd = sys.stdin.fileno()
@@ -38,7 +46,7 @@ def get_key():
         if select.select([sys.stdin], [], [], 0.05)[0]:
             ch = sys.stdin.read(1)
         else:
-            ch = '' # No key was pressed
+            ch = '' 
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     return ch
@@ -47,27 +55,77 @@ print("\n=== Manual Robot Control ===")
 print(" W = Forward  |  S = Backward")
 print(" A = Left     |  D = Right")
 print(" I = UP       |  K = DOWN")
-print(" F = FAN")
+print(" F = FAN      |  H = Set Target Height")
 print(" [Spacebar] = STOP")
 print(" Q = Quit Program")
 print("============================\n")
 
 try:
     while True:
-        # 1. READ INCOMING SERIAL DATA (Instead of throwing it away)
+        # 1. READ INCOMING SERIAL DATA
         while esp32.in_waiting > 0:
             try:
                 line = esp32.readline().decode('utf-8').strip()
                 if line:
-                    # Print in-place using \r so it doesn't spam a million lines
-                    print(f"\r{line}                            ", end="", flush=True)
+                    # Parse the LiDAR distance from the string
+                    if "LIDAR Distance:" in line:
+                        try:
+                            # Extracts the number from "LIDAR Distance: 3.50"
+                            current_height = float(line.split(":")[1].strip())
+                        except ValueError:
+                            pass
+                    
+                    # Terminal display logic
+                    if is_adjusting_height:
+                        print(f"\rAuto-Adjusting... Current: {current_height:.2f} | Target: {target_height:.2f}        ", end="", flush=True)
+                    else:
+                        print(f"\r{line}                            ", end="", flush=True)
+
             except UnicodeDecodeError:
-                pass # Ignore random corrupted bytes
+                pass 
+                
+        # --- AUTO-HEIGHT CONTROLLER ---
+        current_time = time.time()
+        
+        if is_adjusting_height:
+            if current_height < target_height - height_tolerance:
+                # THE FIX: Send the command if it changed, OR if 0.2 seconds have passed!
+                if last_auto_cmd != b"UP\n" or (current_time - last_auto_cmd_time > 0.2):
+                    esp32.write(b"UP\n")
+                    last_auto_cmd = b"UP\n"
+                    last_auto_cmd_time = current_time
+                    
+            elif current_height > target_height + height_tolerance:
+                if last_auto_cmd != b"DOWN\n" or (current_time - last_auto_cmd_time > 0.2):
+                    esp32.write(b"DOWN\n")
+                    last_auto_cmd = b"DOWN\n"
+                    last_auto_cmd_time = current_time
+                    
+            else:
+                # We reached the target!
+                esp32.write(b"STOP\n")
+                is_adjusting_height = False
+                last_auto_cmd = b""
+                print(f"\n[SYSTEM] Target height of {target_height} reached! Resuming manual control.\n")
         
         # 2. HANDLE KEYBOARD INPUT
         key = get_key().lower() 
         if key == '': 
-            continue # If no key was pressed, immediately restart the loop to check serial again!
+            continue 
+            
+        # If user presses H, prompt for a new target height
+        if key == 'h':
+            esp32.write(b"STOP\n") # Stop moving for safety while typing
+            is_adjusting_height = False 
+            print("\n")
+            try:
+                user_input = input("Enter target height: ")
+                target_height = float(user_input)
+                is_adjusting_height = True
+                print(f"[SYSTEM] Auto-Height engaged. Moving to {target_height}...")
+            except ValueError:
+                print("[ERROR] Invalid number. Auto-Height cancelled.")
+            continue
         
         if key == 'q':
             print("\n\nQuitting...")
@@ -75,13 +133,16 @@ try:
             break
             
         if key in key_mapping:
+            # If user manually touches UP, DOWN, or STOP, immediately cancel the auto-adjuster!
+            if key in ['i', 'k', ' ']:
+                is_adjusting_height = False
+                
             command = key_mapping[key]
             esp32.write(command)
 
 except KeyboardInterrupt:
     print("\n\nForce Quit detected.")
 finally:
-    # Failsafe shutdown
     esp32.write(b"STOP\n")
     esp32.close()
     print("Serial connection closed. Motors stopped.")
