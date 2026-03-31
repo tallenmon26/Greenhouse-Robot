@@ -244,7 +244,7 @@ void loop() {
     }
   }
 
-  // 3. Watchdog — gracefully ramps to 0 instead of instantly halting
+ /*
   if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
     targetSpeedM1 = 0;
     targetSpeedM2 = 0;
@@ -252,6 +252,6 @@ void loop() {
     digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
     lastCommandTime = millis();
   }
-
+*/
   pollLidar();
 }
