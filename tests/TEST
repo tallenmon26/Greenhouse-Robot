@@ -37,6 +37,23 @@ STATE_ROW_RETURN = 1
 STATE_AISLE_TRANSIT = 2
 
 current_nav_state = STATE_ROW_OUTWARD
+
+# --- VERTICAL ACTUATION VARIABLES ---
+try:
+    print("\n=== GREENHOUSE MISSION SETUP ===")
+    lower_height = float(input("Enter LOWER target height (ft) [e.g., 1.5]: "))
+    higher_height = float(input("Enter HIGHER target height (ft) [e.g., 3.0]: "))
+except ValueError:
+    print("[ERROR] Invalid input. Defaulting to 1.5ft and 3.0ft.")
+    lower_height = 1.5
+    higher_height = 3.0
+
+current_height = 0.0
+target_height = lower_height # Start by going to the lower height
+is_adjusting_height = True if esp32 else False # Skip if no ESP32 connected
+height_tolerance = 0.1
+last_auto_cmd = b""
+last_auto_cmd_time = 0
 # --------------------------------------
 
 # DepthAI Multi-Device Configuration
@@ -45,7 +62,7 @@ if len(device_infos) > 2:
     device_infos = device_infos[:2]
 
 num_cams = len(device_infos)
-print(f"Initialized hub. Navigation Devices detected: {num_cams}")
+print(f"\nInitialized hub. Navigation Devices detected: {num_cams}")
 
 if num_cams == 0:
     raise RuntimeError("Hardware Error: Zero OAK-D devices enumerated.")
@@ -94,6 +111,21 @@ with contextlib.ExitStack() as stack:
             time.sleep(0.001)
             continue
         last_frame_time = current_time
+        
+        # 1. READ LIDAR DATA (Non-blocking)
+        if esp32:
+            while esp32.in_waiting > 0:
+                try:
+                    line = esp32.readline().decode('utf-8').strip()
+                    if "LIDAR Distance:" in line:
+                        try:
+                            # 1.5 Foot Ground Offset
+                            raw_lidar_feet = float(line.split(":")[1].strip())
+                            current_height = raw_lidar_feet + 1.5 
+                        except ValueError:
+                            pass
+                except UnicodeDecodeError:
+                    pass 
 
         for i in range(num_cams):
             in_depth = depth_qs[i].tryGet()
@@ -117,9 +149,7 @@ with contextlib.ExitStack() as stack:
                 blurred_roi = cv2.GaussianBlur(line_roi_slice, (9, 9), 0)
                 hsv_roi = cv2.cvtColor(blurred_roi, cv2.COLOR_BGR2HSV)
                 
-                # Dynamic Color Masking based on Current State
                 if current_nav_state in [STATE_ROW_OUTWARD, STATE_ROW_RETURN]:
-                    # Looking for RED
                     lower_color_1 = np.array([0, 60, 60]) 
                     upper_color_1 = np.array([10, 255, 255])
                     mask1 = cv2.inRange(hsv_roi, lower_color_1, upper_color_1)
@@ -129,15 +159,12 @@ with contextlib.ExitStack() as stack:
                     mask2 = cv2.inRange(hsv_roi, lower_color_2, upper_color_2)
                     thresh = cv2.bitwise_or(mask1, mask2)
                     target_color_text = "Target: RED"
-                    
-                else: # STATE_AISLE_TRANSIT
-                    # Looking for GREEN (Hue 40 to 90)
+                else: 
                     lower_green = np.array([40, 60, 60])
                     upper_green = np.array([90, 255, 255])
                     thresh = cv2.inRange(hsv_roi, lower_green, upper_green)
                     target_color_text = "Target: GREEN"
                 
-                # Morphology Cleanup
                 kernel = np.ones((5, 5), np.uint8)
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
@@ -176,14 +203,41 @@ with contextlib.ExitStack() as stack:
                                      (topmost[0] + LINE_ROI_X, topmost[1] + LINE_ROI_Y), 
                                      (0, 255, 0), 3)
 
-                # State Machine & Actuation Logic
-                command_to_send = b"STOP\n"
+                # ==========================================
+                # DECISION ENGINE (Driving vs Lifting)
+                # ==========================================
+                command_to_send = b"" # Default to no command sent to prevent buffer flooding
                 status = ""
 
-                if 0 < distance < SAFE_DISTANCE_MM:
+                # OVERRIDE 1: Are we adjusting the height?
+                if is_adjusting_height:
+                    status = f"Lifting to {target_height}ft..."
+                    
+                    if current_height < target_height - height_tolerance:
+                        if last_auto_cmd != b"UP\n" or (current_time - last_auto_cmd_time > 0.2):
+                            command_to_send = b"UP\n"
+                            last_auto_cmd = b"UP\n"
+                            last_auto_cmd_time = current_time
+                            
+                    elif current_height > target_height + height_tolerance:
+                        if last_auto_cmd != b"DOWN\n" or (current_time - last_auto_cmd_time > 0.2):
+                            command_to_send = b"DOWN\n"
+                            last_auto_cmd = b"DOWN\n"
+                            last_auto_cmd_time = current_time
+                            
+                    else:
+                        print(f"\n[SYSTEM] Height {target_height}ft reached. Resuming driving.")
+                        command_to_send = b"STOP\n"
+                        is_adjusting_height = False
+                        last_auto_cmd = b""
+                        missing_line_frames = 0 # Reset frames to prevent accidental double-triggers
+
+                # OVERRIDE 2: Is there an obstacle?
+                elif 0 < distance < SAFE_DISTANCE_MM:
                     status = "STOP! OBSTACLE"
                     command_to_send = b"STOP\n"
                     
+                # STANDARD NAVIGATION: We are at the correct height and path is clear!
                 elif line_detected:
                     missing_line_frames = 0 
                     throttle_speed = int(np.interp(cy, [0, LINE_ROI_H], [127, 40]))
@@ -206,8 +260,9 @@ with contextlib.ExitStack() as stack:
                         elif error < -15 or angle < -15: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
                         elif error > 15 or angle > 15: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
+                
+                # FSM TRANSITION PROTOCOL
                 else:
-                    # Trajectory loss -> State Machine Transition Logic
                     missing_line_frames += 1
                     status = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
                     command_to_send = b"STOP\n"
@@ -216,36 +271,41 @@ with contextlib.ExitStack() as stack:
                         missing_line_frames = 0
                         
                         if current_nav_state == STATE_ROW_OUTWARD:
-                            # Finished going down the row, time to back up
                             if num_cams > 1:
                                 current_nav_state = STATE_ROW_RETURN
                                 active_cam_idx = REAR_CAM_INDEX
-                                print("\n[SYSTEM] End of row. Reversing. Active feed: REAR CAM (RED TAPE)")
+                                
+                                # TRIGGER HEIGHT ADJUSTMENT
+                                target_height = higher_height
+                                is_adjusting_height = True
+                                print("\n[SYSTEM] End of row. Adjusting to HIGHER height. Active feed: REAR CAM (RED TAPE)")
                             else:
                                 status = "END OF TAPE. STOPPED."
                                 
                         elif current_nav_state == STATE_ROW_RETURN:
-                            # Finished backing up, time to take the aisle
                             current_nav_state = STATE_AISLE_TRANSIT
                             active_cam_idx = FRONT_CAM_INDEX
-                            print("\n[SYSTEM] Row complete. Entering aisle. Active feed: FRONT CAM (GREEN TAPE)")
+                            
+                            # TRIGGER HEIGHT ADJUSTMENT
+                            target_height = lower_height
+                            is_adjusting_height = True
+                            print("\n[SYSTEM] Row complete. Adjusting to LOWER height. Entering aisle. Active feed: FRONT CAM (GREEN TAPE)")
                             
                         elif current_nav_state == STATE_AISLE_TRANSIT:
-                            # Finished aisle transit, time to go down the new row
                             current_nav_state = STATE_ROW_OUTWARD
                             active_cam_idx = FRONT_CAM_INDEX
                             print("\n[SYSTEM] Arrived at new row. Active feed: FRONT CAM (RED TAPE)")
 
                         time.sleep(0.5) 
 
-                if esp32:
-                    esp32.reset_input_buffer()
+                if esp32 and command_to_send != b"":
                     esp32.write(command_to_send)
 
                 # Render active telemetry and FSM State
                 cam_label = "FRONT CAM" if active_cam_idx == FRONT_CAM_INDEX else "REAR CAM"
                 cv2.putText(rgb_frame, cam_label, (450, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
                 cv2.putText(rgb_frame, target_color_text, (450, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(rgb_frame, f"Height: {current_height:.1f}ft", (450, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
                 cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
                 
                 cv2.imshow("Robot View", rgb_frame)
