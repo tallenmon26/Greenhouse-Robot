@@ -20,7 +20,7 @@ FPS_LIMIT = 30
 should_quit = False
 
 # System Parameters & Constraints
-SAFE_DISTANCE_MM = 300
+SAFE_DISTANCE_MM = 600
 MIN_CONTOUR_AREA = 500
 MISSING_LINE_THRESHOLD = 30 
 
@@ -39,14 +39,14 @@ STATE_AISLE_TRANSIT = 2
 current_nav_state = STATE_ROW_OUTWARD
 
 # --- VERTICAL ACTUATION VARIABLES ---
-try:
-    print("\n=== GREENHOUSE MISSION SETUP ===")
-    lower_height = float(input("Enter LOWER target height (ft) [e.g., 1.5]: "))
-    higher_height = float(input("Enter HIGHER target height (ft) [e.g., 3.0]: "))
-except ValueError:
-    print("[ERROR] Invalid input. Defaulting to 1.5ft and 3.0ft.")
-    lower_height = 1.5
-    higher_height = 3.0
+print("\n=== GREENHOUSE MISSION SETUP ===")
+while True:
+    try:
+        lower_height = float(input("Enter LOWER target height (ft): "))
+        higher_height = float(input("Enter HIGHER target height (ft): "))
+        break # If both inputs succeed, break out of the loop and continue the script
+    except ValueError:
+        print("[ERROR] Invalid input. Please enter valid numbers and try again.\n")
 
 current_height = 0.0
 target_height = lower_height # Start by going to the lower height
