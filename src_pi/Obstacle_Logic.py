@@ -22,7 +22,7 @@ should_quit = False
 # System Parameters & Constraints
 SAFE_DISTANCE_MM = 300
 MIN_CONTOUR_AREA = 500
-MISSING_LINE_THRESHOLD = 15 # Frame threshold to trigger camera failover
+MISSING_LINE_THRESHOLD = 30 
 
 OBST_ROI_W, OBST_ROI_H = 200, 100
 OBST_ROI_X = (640 - OBST_ROI_W) // 2  
@@ -30,6 +30,14 @@ OBST_ROI_Y = 0
 
 LINE_ROI_W, LINE_ROI_H = 200, 200
 LINE_ROI_X, LINE_ROI_Y = (640 - LINE_ROI_W) // 2, 280
+
+# --- FINITE STATE MACHINE VARIABLES ---
+STATE_ROW_OUTWARD = 0
+STATE_ROW_RETURN = 1
+STATE_AISLE_TRANSIT = 2
+
+current_nav_state = STATE_ROW_OUTWARD
+# --------------------------------------
 
 # DepthAI Multi-Device Configuration
 device_infos = dai.Device.getAllAvailableDevices()
@@ -42,20 +50,21 @@ print(f"Initialized hub. Navigation Devices detected: {num_cams}")
 if num_cams == 0:
     raise RuntimeError("Hardware Error: Zero OAK-D devices enumerated.")
 
-active_cam_idx = 1  
+# Hardware index mapping
+FRONT_CAM_INDEX = 1
+REAR_CAM_INDEX = 0
+
+active_cam_idx = FRONT_CAM_INDEX  
 missing_line_frames = 0
 
-# Context manager for safe multi-device USB allocation
 with contextlib.ExitStack() as stack:
     rgb_qs = []
     depth_qs = []
 
-    # Initialize connected DepthAI devices
     for i, info in enumerate(device_infos):
         device = stack.enter_context(dai.Device(info))
         pipeline = stack.enter_context(dai.Pipeline(device))
         
-        # Configure stereo and RGB nodes
         left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
         right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
         rgb_cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
@@ -69,14 +78,12 @@ with contextlib.ExitStack() as stack:
         left.requestOutput((640, 400)).link(stereo.left)
         right.requestOutput((640, 400)).link(stereo.right)
         
-        # Instantiate device-scoped non-blocking queues prior to pipeline execution
         rgb_qs.append(rgb_out.createOutputQueue(maxSize=4, blocking=False))
         depth_qs.append(stereo.depth.createOutputQueue(maxSize=4, blocking=False))
         
         pipeline.start()
-        
         print(f"Pipeline active for Device {i} [ID: {info.getDeviceId()}]")
-        time.sleep(0.2) # Hardware stabilization delay
+        time.sleep(0.2) 
 
     print("\nSystem active. Awaiting user interrupt (q).")
     last_frame_time = time.time()
@@ -88,12 +95,10 @@ with contextlib.ExitStack() as stack:
             continue
         last_frame_time = current_time
 
-        # Clear buffer queues across all devices to prevent USB overflow
         for i in range(num_cams):
             in_depth = depth_qs[i].tryGet()
             in_rgb = rgb_qs[i].tryGet()
 
-            # Isolate computer vision processing to the active camera stream
             if i == active_cam_idx and in_depth is not None and in_rgb is not None:
                 depth_frame = in_depth.getFrame()
                 rgb_frame = in_rgb.getCvFrame()
@@ -109,33 +114,34 @@ with contextlib.ExitStack() as stack:
 
                 # --- VISION PROCESSING ---
                 line_roi_slice = rgb_frame[LINE_ROI_Y:LINE_ROI_Y+LINE_ROI_H, LINE_ROI_X:LINE_ROI_X+LINE_ROI_W]
-                
-                # 1. BLUR: Soften the image to reduce harsh lighting glare on the tape
                 blurred_roi = cv2.GaussianBlur(line_roi_slice, (9, 9), 0)
                 hsv_roi = cv2.cvtColor(blurred_roi, cv2.COLOR_BGR2HSV)
                 
-                # 2. RELAXED HSV: Lowered the middle and last numbers (Saturation & Value) 
-                # from 100 down to 60 so it catches faded, shiny, or shadowed reds!
-                lower_red_1 = np.array([0, 60, 60]) 
-                upper_red_1 = np.array([10, 255, 255])
-                mask1 = cv2.inRange(hsv_roi, lower_red_1, upper_red_1)
+                # Dynamic Color Masking based on Current State
+                if current_nav_state in [STATE_ROW_OUTWARD, STATE_ROW_RETURN]:
+                    # Looking for RED
+                    lower_color_1 = np.array([0, 60, 60]) 
+                    upper_color_1 = np.array([10, 255, 255])
+                    mask1 = cv2.inRange(hsv_roi, lower_color_1, upper_color_1)
+                    
+                    lower_color_2 = np.array([160, 60, 60])
+                    upper_color_2 = np.array([180, 255, 255])
+                    mask2 = cv2.inRange(hsv_roi, lower_color_2, upper_color_2)
+                    thresh = cv2.bitwise_or(mask1, mask2)
+                    target_color_text = "Target: RED"
+                    
+                else: # STATE_AISLE_TRANSIT
+                    # Looking for GREEN (Hue 40 to 90)
+                    lower_green = np.array([40, 60, 60])
+                    upper_green = np.array([90, 255, 255])
+                    thresh = cv2.inRange(hsv_roi, lower_green, upper_green)
+                    target_color_text = "Target: GREEN"
                 
-                lower_red_2 = np.array([160, 60, 60])
-                upper_red_2 = np.array([180, 255, 255])
-                mask2 = cv2.inRange(hsv_roi, lower_red_2, upper_red_2)
-                
-                thresh = cv2.bitwise_or(mask1, mask2)
-                
-                # 3. MORPHOLOGY: The Digital Steamroller!
-                # Create a 5x5 pixel "brush"
+                # Morphology Cleanup
                 kernel = np.ones((5, 5), np.uint8)
-                
-                # "OPEN" removes random white static/noise in the black background
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-                # "CLOSE" fills in the black holes inside our white tape line
                 thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-                # Show the newly cleaned mask!
                 cv2.imshow("Binary Mask", thresh)
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -148,30 +154,23 @@ with contextlib.ExitStack() as stack:
                 if contours:
                     c = max(contours, key=cv2.contourArea)
                     if cv2.contourArea(c) > MIN_CONTOUR_AREA:
-                        # 1. Position (Where is it?)
                         M = cv2.moments(c)
                         if M["m00"] != 0:
                             cx = int(M["m10"] / M["m00"])
                             cy = int(M["m01"] / M["m00"])
                             error = cx - box_center_x
                             
-                            # 2. Vector Angle (Where is it pointing?)
-                            # Find the extreme top and bottom pixels of the contour
                             topmost = tuple(c[c[:,:,1].argmin()][0])
                             bottommost = tuple(c[c[:,:,1].argmax()][0])
                             
-                            # Calculate the slope angle (0 = perfectly straight up)
                             dx = topmost[0] - bottommost[0]
                             dy = bottommost[1] - topmost[1] 
-                            if dy == 0: dy = 1 # Prevent division by zero
+                            if dy == 0: dy = 1 
                             
                             angle = int(np.degrees(np.arctan2(dx, dy)))
-                            
                             line_detected = True
                             
-                            # Draw the center point (Red Dot)
                             cv2.circle(rgb_frame, (cx + LINE_ROI_X, cy + LINE_ROI_Y), 5, (0, 0, 255), -1)
-                            # Draw the Vector Line (Green Line)
                             cv2.line(rgb_frame, 
                                      (bottommost[0] + LINE_ROI_X, bottommost[1] + LINE_ROI_Y), 
                                      (topmost[0] + LINE_ROI_X, topmost[1] + LINE_ROI_Y), 
@@ -181,79 +180,72 @@ with contextlib.ExitStack() as stack:
                 command_to_send = b"STOP\n"
                 status = ""
 
-                # Hardware index mapping
-                FRONT_CAM_INDEX = 1
-                REAR_CAM_INDEX = 0
-
                 if 0 < distance < SAFE_DISTANCE_MM:
                     status = "STOP! OBSTACLE"
                     command_to_send = b"STOP\n"
                     
                 elif line_detected:
                     missing_line_frames = 0 
-                    
-                    # The Throttle: Slow down based on Y-axis
                     throttle_speed = int(np.interp(cy, [0, LINE_ROI_H], [127, 40]))
                     if esp32: esp32.write(f"SPD:{throttle_speed}\n".encode())
                     
-                    # ==========================================
-                    # FRONT CAMERA LOGIC
-                    # ==========================================
                     if active_cam_idx == FRONT_CAM_INDEX:
-                        
-                        # 1. EDGE PROTECTION: Position completely overrides angle! 
-                        # If it's falling off the screen, drop everything and chase it.
                         if error < -100: status, command_to_send = "Edge LEFT", b"LEFT\n"
                         elif error > 100: status, command_to_send = "Edge RIGHT", b"RIGHT\n"
-                        
-                        # 2. VECTOR TRACKING: Now we safely blend position and angle
                         elif error < -50 or angle < -50: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_LEFT\n"
                         elif error > 50 or angle > 50: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_RIGHT\n"
-                        
                         elif error < -15 or angle < -15: status, command_to_send = "Arc LEFT", b"ARC_LEFT\n"
                         elif error > 15 or angle > 15: status, command_to_send = "Arc RIGHT", b"ARC_RIGHT\n"
-                        
                         else: status, command_to_send = "FORWARD", b"FORWARD\n"
                         
-                    # ==========================================
-                    # REAR CAMERA LOGIC
-                    # ==========================================
                     elif active_cam_idx == REAR_CAM_INDEX:
-                        
-                        # Edge Protection (Inverted for reverse)
                         if error < -100: status, command_to_send = "Edge REV L", b"LEFT\n" 
                         elif error > 100: status, command_to_send = "Edge REV R", b"RIGHT\n"
-                        
-                        # Vector Tracking (Inverted for reverse)
                         elif error < -50 or angle < -50: status, command_to_send = "Tight Arc L", b"TIGHT_ARC_REV_RIGHT\n"
                         elif error > 50 or angle > 50: status, command_to_send = "Tight Arc R", b"TIGHT_ARC_REV_LEFT\n"
-                        
                         elif error < -15 or angle < -15: status, command_to_send = "Arc REV L", b"ARC_REV_RIGHT\n"
                         elif error > 15 or angle > 15: status, command_to_send = "Arc REV R", b"ARC_REV_LEFT\n"
-                        
                         else: status, command_to_send = "BACKWARD", b"BACKWARD\n"
                 else:
-                    # Handle trajectory loss and execute failover sequence
+                    # Trajectory loss -> State Machine Transition Logic
                     missing_line_frames += 1
                     status = f"Searching... ({missing_line_frames}/{MISSING_LINE_THRESHOLD})"
                     command_to_send = b"STOP\n"
                     
                     if missing_line_frames >= MISSING_LINE_THRESHOLD:
-                        if num_cams > 1:
-                            active_cam_idx = REAR_CAM_INDEX if active_cam_idx == FRONT_CAM_INDEX else FRONT_CAM_INDEX
-                            missing_line_frames = 0
-                            print(f"\n[SYSTEM] Executing failover. Active feed: Camera {active_cam_idx}")
-                            time.sleep(0.5) 
-                        else:
-                            status = "END OF TAPE. STOPPED."
+                        missing_line_frames = 0
+                        
+                        if current_nav_state == STATE_ROW_OUTWARD:
+                            # Finished going down the row, time to back up
+                            if num_cams > 1:
+                                current_nav_state = STATE_ROW_RETURN
+                                active_cam_idx = REAR_CAM_INDEX
+                                print("\n[SYSTEM] End of row. Reversing. Active feed: REAR CAM (RED TAPE)")
+                            else:
+                                status = "END OF TAPE. STOPPED."
+                                
+                        elif current_nav_state == STATE_ROW_RETURN:
+                            # Finished backing up, time to take the aisle
+                            current_nav_state = STATE_AISLE_TRANSIT
+                            active_cam_idx = FRONT_CAM_INDEX
+                            print("\n[SYSTEM] Row complete. Entering aisle. Active feed: FRONT CAM (GREEN TAPE)")
+                            
+                        elif current_nav_state == STATE_AISLE_TRANSIT:
+                            # Finished aisle transit, time to go down the new row
+                            current_nav_state = STATE_ROW_OUTWARD
+                            active_cam_idx = FRONT_CAM_INDEX
+                            print("\n[SYSTEM] Arrived at new row. Active feed: FRONT CAM (RED TAPE)")
+
+                        time.sleep(0.5) 
 
                 if esp32:
                     esp32.reset_input_buffer()
                     esp32.write(command_to_send)
 
-                # Render active camera telemetry
+                # Render active telemetry and FSM State
                 cam_label = "FRONT CAM" if active_cam_idx == FRONT_CAM_INDEX else "REAR CAM"
                 cv2.putText(rgb_frame, cam_label, (450, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+                cv2.putText(rgb_frame, target_color_text, (450, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
                 cv2.putText(rgb_frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
                 
                 cv2.imshow("Robot View", rgb_frame)
