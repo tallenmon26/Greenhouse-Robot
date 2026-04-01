@@ -32,9 +32,13 @@ key_mapping = {
 target_height = 0.0
 current_height = 0.0
 is_adjusting_height = False
-height_tolerance = 0.1  # Stops the motor if within 0.1 units of the target to prevent jitter
+height_tolerance = 0.1  
 last_auto_cmd = b""
 last_auto_cmd_time = 0
+
+# --- Manual Control Watchdog Variables ---
+last_manual_cmd = b"STOP\n"
+last_manual_cmd_time = 0
 
 def get_key():
     """NON-BLOCKING key reader so the buffer flush can run constantly!"""
@@ -67,29 +71,35 @@ try:
             try:
                 line = esp32.readline().decode('utf-8').strip()
                 if line:
-                    # Parse the LiDAR distance from the string
                     if "LIDAR Distance:" in line:
                         try:
-                            # Extracts the number from "LIDAR Distance: 3.50"
-                            current_height = float(line.split(":")[1].strip())
+                            # 1.5 Foot (18 inches) Ground Offset!
+                            raw_lidar_feet = float(line.split(":")[1].strip())
+                            current_height = raw_lidar_feet + 1.5 
+                            
+                            # THE FIX: We tell the terminal to print our new 'current_height' variable,
+                            # instead of just printing the raw ESP32 string!
+                            if is_adjusting_height:
+                                print(f"\rAuto-Adjusting... Current: {current_height:.2f} ft | Target: {target_height:.2f} ft        ", end="", flush=True)
+                            else:
+                                print(f"\rTrue Ground Height: {current_height:.2f} ft                            ", end="", flush=True)
+                                
                         except ValueError:
                             pass
-                    
-                    # Terminal display logic
-                    if is_adjusting_height:
-                        print(f"\rAuto-Adjusting... Current: {current_height:.2f} | Target: {target_height:.2f}        ", end="", flush=True)
                     else:
+                        # If the ESP32 sends something else (like "Connected"), print it normally
                         print(f"\r{line}                            ", end="", flush=True)
 
             except UnicodeDecodeError:
                 pass 
                 
-        # --- AUTO-HEIGHT CONTROLLER ---
+        # --- THE MASTER CLOCK ---
+        # If this isn't in the main loop, the software watchdog fails!
         current_time = time.time()
         
+        # --- AUTO-HEIGHT CONTROLLER ---
         if is_adjusting_height:
             if current_height < target_height - height_tolerance:
-                # THE FIX: Send the command if it changed, OR if 0.2 seconds have passed!
                 if last_auto_cmd != b"UP\n" or (current_time - last_auto_cmd_time > 0.2):
                     esp32.write(b"UP\n")
                     last_auto_cmd = b"UP\n"
@@ -102,7 +112,6 @@ try:
                     last_auto_cmd_time = current_time
                     
             else:
-                # We reached the target!
                 esp32.write(b"STOP\n")
                 is_adjusting_height = False
                 last_auto_cmd = b""
@@ -111,11 +120,16 @@ try:
         # 2. HANDLE KEYBOARD INPUT
         key = get_key().lower() 
         if key == '': 
+            # THE FIX: Python Watchdog! 
+            # If no key is pressed for 0.2s, and we aren't auto-adjusting, kill the motors!
+            if not is_adjusting_height and last_manual_cmd != b"STOP\n":
+                if current_time - last_manual_cmd_time > 0.2:
+                    esp32.write(b"STOP\n")
+                    last_manual_cmd = b"STOP\n"
             continue 
             
-        # If user presses H, prompt for a new target height
         if key == 'h':
-            esp32.write(b"STOP\n") # Stop moving for safety while typing
+            esp32.write(b"STOP\n") 
             is_adjusting_height = False 
             print("\n")
             try:
@@ -133,12 +147,15 @@ try:
             break
             
         if key in key_mapping:
-            # If user manually touches UP, DOWN, or STOP, immediately cancel the auto-adjuster!
             if key in ['i', 'k', ' ']:
                 is_adjusting_height = False
                 
             command = key_mapping[key]
             esp32.write(command)
+            
+            # Reset the Python Watchdog timer every time a key is read
+            last_manual_cmd = command
+            last_manual_cmd_time = current_time
 
 except KeyboardInterrupt:
     print("\n\nForce Quit detected.")
