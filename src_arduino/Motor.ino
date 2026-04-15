@@ -1,11 +1,10 @@
 #include <SabertoothSimplified.h>
 
-// 1. Create a new hardware serial port
+// Hardware serial configuration
 HardwareSerial SaberSerial(2); 
-
-// 2. Tell the Sabertooth library to use this new port
 SabertoothSimplified ST(SaberSerial);
 
+// Pin definitions
 const int Fan1     = D2;
 const int Fan2     = D3;
 const int RPWM_PIN = D4;
@@ -13,33 +12,36 @@ const int LPWM_PIN = D5;
 const int LIDAR_RX = D6;
 const int LIDAR_TX = D7;
 
-unsigned long lastCommandTime  = 0;
-unsigned long lastLidarTime    = 0;
+// Timing and state variables
+unsigned long lastCommandTime = 0;
+unsigned long lastLidarTime   = 0;
 int lidarState = 0;
 unsigned long lidarTimer = 0;
 
-// Set to 10 seconds for Line Following deduplication
 const unsigned long WATCHDOG_TIMEOUT = 500; 
 
+// Motor speeds
 const int DRIVE_SPEED = 127;
 const int TURN_SPEED  = 63;
 
-// --- Smart Braking Profiler Variables ---
+// Kinematic profiling parameters
 int currentSpeedM1 = 0;
 int currentSpeedM2 = 0;
 int targetSpeedM1  = 0;
 int targetSpeedM2  = 0;
-int lastSentM1 = -999;
-int lastSentM2 = -999;
+int lastSentM1     = -999;
+int lastSentM2     = -999;
+
 const int ACCEL_STEP = 5;
-const int BRAKE_STEP = 15; // Fast braking to prevent overshoot
+const int BRAKE_STEP = 15; 
 const int RAMP_INTERVAL = 50;
 unsigned long lastRampTime = 0;
-// ----------------------------------------
 
+// LiDAR request payload
 const byte request[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A};
 float currentDist = 0;
 
+// Serial command buffer
 static char cmdBuf[32];
 static int  cmdLen = 0;
 
@@ -48,26 +50,23 @@ void setupLidar() {
 }
 
 void pollLidar() {
-  // State 0: Send the request and start the stopwatch
   if (lidarState == 0 && (millis() - lastLidarTime > 100)) {
     while (Serial1.available()) Serial1.read(); 
     Serial1.write(request, sizeof(request));
     lidarTimer = millis();
     lidarState = 1; 
   }
-  // State 1: 50ms have passed, read the data
   else if (lidarState == 1 && (millis() - lidarTimer > 50)) {
     if (Serial1.available() >= 7) {
       byte response[7];
       for (int i = 0; i < 7; i++) response[i] = Serial1.read();
+      
       if (response[0] == 0x01 && response[1] == 0x03) {
         int rawCm = (response[3] << 8) | response[4];
-        currentDist = rawCm / 30.48;
-        //Serial.print("LIDAR Distance: ");
-       // Serial.println(currentDist, 2);
+        currentDist = rawCm / 30.48; // Convert to feet
       }
     }
-    lidarState = 0; // Reset for the next reading
+    lidarState = 0; 
     lastLidarTime = millis();
   }
 }
@@ -77,11 +76,15 @@ void setup() {
   Serial.begin(115200);
   setupLidar();
 
-  pinMode(Fan1,     OUTPUT);  pinMode(Fan2,     OUTPUT);
-  pinMode(RPWM_PIN, OUTPUT);  pinMode(LPWM_PIN, OUTPUT);
+  pinMode(Fan1,     OUTPUT);  
+  pinMode(Fan2,     OUTPUT);
+  pinMode(RPWM_PIN, OUTPUT);  
+  pinMode(LPWM_PIN, OUTPUT);
 
-  digitalWrite(RPWM_PIN, LOW);  digitalWrite(LPWM_PIN, LOW);
-  digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
+  digitalWrite(RPWM_PIN, LOW);  
+  digitalWrite(LPWM_PIN, LOW);
+  digitalWrite(Fan1, HIGH);     
+  digitalWrite(Fan2, HIGH);
 
   delay(2000);
   
@@ -95,7 +98,6 @@ void setup() {
 void handleCommand() {
   lastCommandTime = millis();
 
-  // Instead of directly setting ST.motor, we now just update the TARGET speed
   if (strcmp(cmdBuf, "FORWARD") == 0) {
     targetSpeedM1 = DRIVE_SPEED;
     targetSpeedM2 = DRIVE_SPEED;
@@ -124,49 +126,55 @@ void handleCommand() {
     digitalWrite(RPWM_PIN, LOW);  digitalWrite(LPWM_PIN, HIGH);
     digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
   }
+  
+  // Standard forward arcs
   else if (strcmp(cmdBuf, "ARC_LEFT") == 0) {
-    targetSpeedM1 = TURN_SPEED;  // Inside wheel moves forward, but slower
-    targetSpeedM2 = DRIVE_SPEED; // Outside wheel pushes at full speed
+    targetSpeedM1 = TURN_SPEED;  
+    targetSpeedM2 = DRIVE_SPEED; 
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
   else if (strcmp(cmdBuf, "ARC_RIGHT") == 0) {
-    targetSpeedM1 = DRIVE_SPEED; // Outside wheel pushes at full speed
-    targetSpeedM2 = TURN_SPEED;  // Inside wheel moves forward, but slower
+    targetSpeedM1 = DRIVE_SPEED; 
+    targetSpeedM2 = TURN_SPEED;  
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
-  // --- TIGHT FORWARD ARCS (Less forward momentum!) ---
+  
+  // Tight forward arcs
   else if (strcmp(cmdBuf, "TIGHT_ARC_LEFT") == 0) {
-    targetSpeedM1 = 0;           // Inside wheel stops completely
-    targetSpeedM2 = TURN_SPEED;  // Outside wheel pushes gently
+    targetSpeedM1 = 0;           
+    targetSpeedM2 = TURN_SPEED;  
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
   else if (strcmp(cmdBuf, "TIGHT_ARC_RIGHT") == 0) {
-    targetSpeedM1 = TURN_SPEED;  // Outside wheel pushes gently
-    targetSpeedM2 = 0;           // Inside wheel stops completely
+    targetSpeedM1 = TURN_SPEED;  
+    targetSpeedM2 = 0;           
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
 
-  // --- REVERSE ARCS ---
+  // Standard reverse arcs
   else if (strcmp(cmdBuf, "ARC_REV_LEFT") == 0) {
-    targetSpeedM1 = -TURN_SPEED;  // Left wheel slow reverse
-    targetSpeedM2 = -DRIVE_SPEED; // Right wheel fast reverse (pushes tail left)
+    targetSpeedM1 = -TURN_SPEED;  
+    targetSpeedM2 = -DRIVE_SPEED; 
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
   else if (strcmp(cmdBuf, "ARC_REV_RIGHT") == 0) {
-    targetSpeedM1 = -DRIVE_SPEED; // Left wheel fast reverse (pushes tail right)
-    targetSpeedM2 = -TURN_SPEED;  // Right wheel slow reverse
+    targetSpeedM1 = -DRIVE_SPEED; 
+    targetSpeedM2 = -TURN_SPEED;  
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
+  
+  // Tight reverse arcs
   else if (strcmp(cmdBuf, "TIGHT_ARC_REV_LEFT") == 0) {
-    targetSpeedM1 = 0;            // Inside wheel stops completely
-    targetSpeedM2 = -TURN_SPEED;  // Outside wheel reverses gently (pushes tail left)
+    targetSpeedM1 = 0;            
+    targetSpeedM2 = -TURN_SPEED;  
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
   else if (strcmp(cmdBuf, "TIGHT_ARC_REV_RIGHT") == 0) {
-    targetSpeedM1 = -TURN_SPEED;  // Outside wheel reverses gently (pushes tail right)
-    targetSpeedM2 = 0;            // Inside wheel stops completely
+    targetSpeedM1 = -TURN_SPEED;  
+    targetSpeedM2 = 0;            
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
+  
   else if (strcmp(cmdBuf, "FAN") == 0) {
     digitalWrite(Fan1, LOW);  digitalWrite(Fan2, LOW);
   }
@@ -179,7 +187,7 @@ void handleCommand() {
 }
 
 void loop() {
-  // 1. Non-blocking char-by-char parser
+  // Process incoming serial commands
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
@@ -197,11 +205,11 @@ void loop() {
     }
   }
 
-  // 2. Dual-Channel Smart Acceleration Profiler
+  // Dual-channel kinematic profiling
   if (millis() - lastRampTime > RAMP_INTERVAL) {
     lastRampTime = millis();
     
-    // SMART BRAKING: Are we moving towards zero? 
+    // Determine acceleration vs. braking step values
     int stepM1 = ACCEL_STEP;
     if ((currentSpeedM1 > 0 && targetSpeedM1 < currentSpeedM1) || 
         (currentSpeedM1 < 0 && targetSpeedM1 > currentSpeedM1)) {
@@ -214,27 +222,27 @@ void loop() {
       stepM2 = BRAKE_STEP;
     }
 
-    // Process Motor 1
+    // Apply speed adjustments for Motor 1
     if (currentSpeedM1 < targetSpeedM1) {
       currentSpeedM1 += stepM1;
-      if (currentSpeedM1 > targetSpeedM1) currentSpeedM1 = targetSpeedM1; // Clamp
+      if (currentSpeedM1 > targetSpeedM1) currentSpeedM1 = targetSpeedM1;
     }
     else if (currentSpeedM1 > targetSpeedM1) {
       currentSpeedM1 -= stepM1;
-      if (currentSpeedM1 < targetSpeedM1) currentSpeedM1 = targetSpeedM1; // Clamp
+      if (currentSpeedM1 < targetSpeedM1) currentSpeedM1 = targetSpeedM1;
     }
     
-    // Process Motor 2
+    // Apply speed adjustments for Motor 2
     if (currentSpeedM2 < targetSpeedM2) {
       currentSpeedM2 += stepM2;
-      if (currentSpeedM2 > targetSpeedM2) currentSpeedM2 = targetSpeedM2; // Clamp
+      if (currentSpeedM2 > targetSpeedM2) currentSpeedM2 = targetSpeedM2;
     }
     else if (currentSpeedM2 > targetSpeedM2) {
       currentSpeedM2 -= stepM2;
-      if (currentSpeedM2 < targetSpeedM2) currentSpeedM2 = targetSpeedM2; // Clamp
+      if (currentSpeedM2 < targetSpeedM2) currentSpeedM2 = targetSpeedM2;
     }
 
-    // Send the calculated speeds to the Sabertooth
+    // Transmit updated speeds to Sabertooth controller
     if (currentSpeedM1 != lastSentM1 || currentSpeedM2 != lastSentM2) {
       ST.motor(1, currentSpeedM1);
       ST.motor(2, currentSpeedM2);
@@ -244,7 +252,8 @@ void loop() {
     }
   }
 
- /*
+  // Watchdog timeout implementation (Currently disabled)
+  /*
   if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
     targetSpeedM1 = 0;
     targetSpeedM2 = 0;
@@ -252,6 +261,7 @@ void loop() {
     digitalWrite(Fan1, HIGH);     digitalWrite(Fan2, HIGH);
     lastCommandTime = millis();
   }
-*/
+  */
+
   pollLidar();
 }
